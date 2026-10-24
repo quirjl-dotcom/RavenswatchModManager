@@ -233,6 +233,9 @@ def item_preview(req: dict) -> dict:
         # The text the item kind writes when the page leaves the description empty.
         from rsmm.engine.item_effect import describe, parse_effects
         out["autoText"] = describe(parse_effects(fields["effects"]))
+    if fields.get("super_effects"):
+        from rsmm.engine.item_effect import describe, parse_effects
+        out["autoSuper"] = describe(parse_effects(fields["super_effects"]), one_line=True)
     for part, fmt in _CARD_FORMATS.items():
         out[part] = _built_slots(ent, fmt)
     return out
@@ -339,6 +342,7 @@ def stats() -> list[dict]:
     heard = charges_heard()
     return [{"name": n, "used": used.get(k, 0), "key": _hex(k), "aka": stat_aka(n),
              "onHit": k in on_hit, "tally": stat_tally(n), "charge": is_charge(k),
+             "integer": IM.is_integer_stat(k),
              "amounts": [min(spans[k]), max(spans[k])] if k in spans else None}
             for n, k in sorted(IM.stat_catalog().items(), key=lambda kv: kv[0].lower())
             if k not in state and not (heard and is_charge(k) and k not in heard)]
@@ -1005,8 +1009,9 @@ def item_defs(req: dict) -> list[tuple[str, str, dict]]:
     ``req``: ``mode`` (``clone``, the default, ``replace`` or ``blank``),
     ``id``, ``base``, optional ``name``/``description``/``rarity``/``icon``,
     ``values`` = ``[{label, old, new, shadowed}]`` (changed only), ``stats`` =
-    ``[{modifier, stat}]`` (changed only), ``effects`` (the item kind's
-    ``effects`` tables) and ``superDescription``.
+    ``[{modifier, stat}]`` (changed only), ``effects`` and ``superEffects``
+    (the item kind's ``effects`` / ``super_effects`` tables) and
+    ``superDescription``.
 
     A replacement changes the shipped item itself: its block id is the base's,
     it keeps the base's rarity, and with nothing changed it writes nothing. A
@@ -1027,7 +1032,7 @@ def item_defs(req: dict) -> list[tuple[str, str, dict]]:
         raise EditorError("give the copy an id of its own")
     if mode == "blank":
         # No base: the item kind writes it from scratch and its effects.
-        if not req.get("effects"):
+        if not req.get("effects") and not req.get("superEffects"):
             raise EditorError("add an effect: an item from scratch does only what its "
                               "effects say")
         fields: dict = {"kind": "item", "id": new_id}
@@ -1104,6 +1109,15 @@ def _item_edits(req: dict, icon_name: str, fields: dict) -> None:
         except ItemEffectError as e:
             raise EditorError(str(e)) from None
         fields["effects"] = effects
+    supers = req.get("superEffects") or []
+    if supers:
+        if req.get("noSuper"):
+            raise EditorError("“No super effect” drops the super effects you added")
+        try:
+            parse_effects(supers)
+        except ItemEffectError as e:
+            raise EditorError(f"super effect: {e}") from None
+        fields["super_effects"] = supers
     if req.get("sharedIdentity") and req.get("mode") == "clone":
         fields["unique_identity"] = False         # a copy has its own by default
     sup = req.get("superDescription")
@@ -1658,43 +1672,21 @@ def card_font(name: str) -> dict | None:
 
 @_once
 def _card_font_pair(name: str) -> tuple[dict, bytes] | None:
-    """A card font's glyph table and its page as PNG, checked to belong together.
-
-    The two are separate files, and read one by one they can come from
-    different stores: the mirror has the table but not the page texture, and a
-    `.rsmm.bak` made before a game update (or a font mod's leftovers) is a
-    different build from the live file beside it. The page draws every glyph
-    as a slice of the page at the table's coordinates, so a mismatched pair is
-    not a little off: every letter is the wrong letter. Each table copy is
-    tried with each page copy, live install first (what the game draws with),
-    and only a pair `game_font.fits` accepts is used; with none, the card falls
-    back to plain text, which is readable.
-    """
-    from itertools import product
-
-    from rsmm.engine import cooked, corpus, game_font, icon_decode
-    from rsmm.engine.cooked_schemas.texture import TextureHandler
+    """A card font's glyph table and its page as PNG, checked to belong
+    together (`rsmm.engine.game_font.load`). With none, the card falls back to
+    plain text, which is readable."""
+    from rsmm.engine import game_font, icon_decode
     rel = CARD_FONTS.get(name)
     if rel is None:
         return None
-    tables = corpus.install_copies(rel) + [p for p in (corpus.mirror_path(rel),) if p]
-    for table_path, page_kind in product(tables, (0, 1)):
-        try:
-            f = game_font.parse(table_path.read_bytes())
-            pages = corpus.install_copies(rel.rsplit("/", 1)[0] + "/" + f.page + ".Texture.dxt")
-            if page_kind >= len(pages):
-                continue
-            cf = cooked.parse(pages[page_kind].read_bytes())
-            tex = TextureHandler.parse_payload(cf.sections[-1].payload)
-            rgba = icon_decode.decode_to_rgba(tex.pixels, tex.width, tex.height, tex.format_name)
-        except (OSError, ValueError, KeyError, IndexError):
-            continue
-        if game_font.fits(f, rgba, tex.width, tex.height):
-            meta = {"page": f.page, "pageW": f.page_w, "pageH": f.page_h,
-                    "lineHeight": f.line_height, "size": f.size,
-                    "glyphs": {str(cp): list(g) for cp, g in f.glyphs.items()}}
-            return meta, icon_decode.rgba_to_png(rgba, tex.width, tex.height)
-    return None
+    pair = game_font.load(rel)
+    if pair is None:
+        return None
+    f, rgba, width, height = pair
+    meta = {"page": f.page, "pageW": f.page_w, "pageH": f.page_h,
+            "lineHeight": f.line_height, "size": f.size,
+            "glyphs": {str(cp): list(g) for cp, g in f.glyphs.items()}}
+    return meta, icon_decode.rgba_to_png(rgba, width, height)
 
 
 def _card_texture(req: Request) -> Raw:

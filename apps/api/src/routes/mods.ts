@@ -7,6 +7,7 @@ import {
   modUploadRequestSchema,
   modVersionCreateSchema,
   reportCreateSchema,
+  reviewReplySchema,
   reviewUpsertSchema,
 } from '@rsmm/schemas';
 import { and, asc, desc, eq, gte, ilike, notInArray, or, sql } from 'drizzle-orm';
@@ -17,7 +18,7 @@ import { isPgErrorCode } from '../db-errors.js';
 import { s3Configured, virusTotalConfigured } from '../env.js';
 import { errString } from '../logger.js';
 import { canManageMod } from '../mod-access.js';
-import { notify, notifyFollowers } from '../notify.js';
+import { notify, notifyFollowers, notifyReview, notifyReviewReply } from '../notify.js';
 import { createRateLimiter } from '../rate-limit.js';
 import {
   RESET_SCAN_FIELDS,
@@ -401,7 +402,10 @@ modsRouter.get('/:slug', zValidator('param', slugParamSchema), async (c) => {
     (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
   );
   const servableVersions = sortedVersions.filter((v) => isServable(v.scanStatus));
-  const canManage = viewer ? isAdmin(viewer.id) || (await canManageMod(mod, viewer.id)) : false;
+  // isAuthor = owner or co-author (may reply to reviews, may not review);
+  // canManage additionally covers admins.
+  const isAuthor = viewer ? await canManageMod(mod, viewer.id) : false;
+  const canManage = isAuthor || (viewer ? isAdmin(viewer.id) : false);
   const visibleVersions = canManage ? sortedVersions : servableVersions;
 
   // Follow state for the current viewer + total follower count (both cheap).
@@ -438,6 +442,7 @@ modsRouter.get('/:slug', zValidator('param', slugParamSchema), async (c) => {
       takedownStatus: mod.takedownStatus,
       takedownReason: mod.takedownReason,
       isFollowing,
+      isAuthor,
       followerCount,
       dependencies:
         (servableVersions[0]?.manifestJson as { dependencies?: Record<string, string> } | undefined)
@@ -1277,6 +1282,8 @@ modsRouter.get('/:slug/reviews', zValidator('param', slugParamSchema), async (c)
       rating: schema.modReviews.rating,
       title: schema.modReviews.title,
       body: schema.modReviews.body,
+      ownerReply: schema.modReviews.ownerReply,
+      ownerReplyAt: schema.modReviews.ownerReplyAt,
       createdAt: schema.modReviews.createdAt,
       updatedAt: schema.modReviews.updatedAt,
       userName: schema.users.name,
@@ -1296,6 +1303,8 @@ modsRouter.get('/:slug/reviews', zValidator('param', slugParamSchema), async (c)
     rating: r.rating,
     title: r.title,
     body: r.body,
+    ownerReply: r.ownerReply,
+    ownerReplyAt: r.ownerReplyAt?.toISOString() ?? null,
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
   }));
@@ -1331,7 +1340,7 @@ modsRouter.put(
     }
 
     const now = new Date();
-    await db
+    const [saved] = await db
       .insert(schema.modReviews)
       .values({
         modId: mod.id,
@@ -1349,19 +1358,80 @@ modsRouter.put(
           body: body.body ?? null,
           updatedAt: now,
         },
-      });
+      })
+      // xmax = 0 only on a freshly inserted row, so edits don't re-notify.
+      .returning({ isNew: sql<boolean>`xmax = 0` });
 
     await recomputeRating(mod.id);
-    // Tell the owner someone reviewed their mod (in-app only).
     if (mod.ownerId) {
-      await notify({
-        userId: mod.ownerId,
+      await notifyReview({
+        ownerId: mod.ownerId,
         type: 'mod_review',
-        title: `New review on ${mod.name}`,
-        body: `${user.name ?? 'Someone'} rated it ${body.rating}/5.`,
+        itemName: mod.name,
         link: `/registry/${mod.slug}`,
+        reviewerName: user.name,
+        rating: body.rating,
+        title: body.title,
+        body: body.body,
+        isNew: saved?.isNew ?? false,
       });
     }
+    return c.json({ ok: true });
+  },
+);
+
+// The mod's team can post one public reply per review; the reviewer is told.
+const reviewReplyParamSchema = slugParamSchema.extend({ reviewId: z.string().uuid() });
+modsRouter.use('/:slug/reviews/:reviewId/reply', reviewLimiter);
+modsRouter.put(
+  '/:slug/reviews/:reviewId/reply',
+  zValidator('param', reviewReplyParamSchema),
+  zValidator('json', reviewReplySchema),
+  async (c) => {
+    const user = c.get('user');
+    if (!user) return c.json({ error: 'unauthorized' }, 401);
+    const { slug, reviewId } = c.req.valid('param');
+    const { body } = c.req.valid('json');
+    const db = getDb();
+    const mod = await db.query.mods.findFirst({ where: eq(schema.mods.slug, slug) });
+    if (!mod || mod.takedownStatus !== 'active') return c.json({ error: 'not found' }, 404);
+    if (!(await canManageMod(mod, user.id))) return c.json({ error: 'forbidden' }, 403);
+    const review = await db.query.modReviews.findFirst({
+      where: and(eq(schema.modReviews.id, reviewId), eq(schema.modReviews.modId, mod.id)),
+    });
+    if (!review) return c.json({ error: 'not found' }, 404);
+
+    await db
+      .update(schema.modReviews)
+      .set({ ownerReply: body, ownerReplyAt: new Date() })
+      .where(eq(schema.modReviews.id, review.id));
+    await notifyReviewReply({
+      reviewerId: review.userId,
+      itemName: mod.name,
+      link: `/registry/${mod.slug}`,
+      replierName: user.name,
+      reply: body,
+      isNew: review.ownerReply == null,
+    });
+    return c.json({ ok: true });
+  },
+);
+
+modsRouter.delete(
+  '/:slug/reviews/:reviewId/reply',
+  zValidator('param', reviewReplyParamSchema),
+  async (c) => {
+    const user = c.get('user');
+    if (!user) return c.json({ error: 'unauthorized' }, 401);
+    const { slug, reviewId } = c.req.valid('param');
+    const db = getDb();
+    const mod = await db.query.mods.findFirst({ where: eq(schema.mods.slug, slug) });
+    if (!mod) return c.json({ error: 'not found' }, 404);
+    if (!(await canManageMod(mod, user.id))) return c.json({ error: 'forbidden' }, 403);
+    await db
+      .update(schema.modReviews)
+      .set({ ownerReply: null, ownerReplyAt: null })
+      .where(and(eq(schema.modReviews.id, reviewId), eq(schema.modReviews.modId, mod.id)));
     return c.json({ ok: true });
   },
 );

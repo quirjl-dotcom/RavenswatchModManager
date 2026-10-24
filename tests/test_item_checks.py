@@ -4,6 +4,8 @@ Pebbles (an Increase_Shield copy made into "+30% crit for 5 s after a hit",
 
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from rsmm.engine import corpus
@@ -121,7 +123,7 @@ def test_an_effect_builds_the_proven_timed_bonus_and_cuts_the_bases_own():
     assert "Modifier" not in hit["activates"].rsplit("\\", 1)[-1]
     stats = {m.name: m.stat for m in IM.list_modifiers(ent)}
     assert stats["Crit Chance Modifier Effect"] == "Crit chance"
-    assert _slots(ent) == [("Crit Chance Value Effect", 1),
+    assert _slots(ent) == [("Crit Chance Value Operation Effect", 1),
                            ("Crit Chance Duration Value Effect", 0)]
     assert b"Dash_Crit_Chance\\" not in ent and item_warnings(ent, _shield(), set()) == []
 
@@ -131,7 +133,7 @@ def test_an_effect_on_dash_and_without_percent():
     state = {f.name: f.text for f in EF.fields(EntityFile(ent, "x").component("On Trigger Effect"))}
     assert state["activates"].endswith("Crit Chance Modifier Timer Effect")
     assert "Timer" not in (state.get("deactivates?") or "")        # no restart
-    assert _slots(ent)[0] == ("Crit Chance Value Effect", 0)
+    assert _slots(ent)[0] == ("Crit Chance Value Operation Effect", 0)
 
 
 @pytest.mark.parametrize("on", sorted(__import__("rsmm.engine.item_effect",
@@ -186,7 +188,7 @@ def test_the_editor_preview_reads_the_built_card():
     req = {"mode": "clone", "base": "Increase_Shield", "id": "Increase_Shie_M"}
     out = item_preview(req | {"effect": _effect()})
     assert out["description"] == [
-        {"node": "Crit Chance Value Effect", "value": 0.3, "mode": 1},
+        {"node": "Crit Chance Value Operation Effect", "value": 0.3, "mode": 1},
         {"node": "Crit Chance Duration Value Effect", "value": 5.0, "mode": 0}]
     assert out["warnings"] == []
     out = item_preview(req | {"values": [{"label": "Shield Value", "old": 1.0, "new": 0.3,
@@ -315,3 +317,195 @@ def test_an_item_with_no_base_and_no_effects_says_what_it_needs(tmp_path):
     from rsmm.sdk.kinds import items
     with pytest.raises(ContentError, match="built from its 'effects'"):
         items.emit("m", ContentDef("item", "Charm", {"name": "Charm"}), tmp_path / "a")
+
+
+def test_day_and_night_effects_build_and_describe():
+    from rsmm.engine import entity_check as CK
+    from rsmm.engine import item_effect as IE
+    effs = [{"stat": "Crit chance", "amount": 0.15, "during": "day"},
+            {"stat": "Armour", "amount": 8, "percent": False, "during": "night"}]
+    parsed = IE.parse_effects(effs)
+    assert [e.during for e in parsed] == ["day", "night"]
+    assert IE.Effect.parse({"stat": "Crit chance", "amount": 0.1, "on": "day"}).during == "day"
+    assert IE.describe(parsed).splitlines() == [
+        "• During the day, #+{0}%@ #Crit chance@",
+        "• During the night, #+{1}@ #Armour@",
+    ]
+    with pytest.raises(IE.ItemEffectError, match="during"):
+        IE.Effect.parse({"stat": "Crit chance", "amount": 0.1, "during": "dusk"})
+    files = C.build_magic_item(new_id="Solar_Lunar_Charm", base_id="Increase_Shield",
+                               base_cooked=_shield(), corpus=[], rarity="Rare",
+                               effect=effs, super_effect=False)
+    ent = next(b for p, b in files.items() if p.endswith(".gen"))
+    eq = next(f for f in EF.fields(EntityFile(ent, "x").component("State Picked Up"))
+              if f.name == "while_active").text
+    assert "Crit Chance Modifier Active Tester Effect" in eq
+    assert "Crit Chance Modifier Active Tester Effect 2" in eq
+    assert item_warnings(ent, _shield(), set()) == []
+    assert CK.check(ent, _shield(), name="Solar_Lunar_Charm") == []
+
+
+def test_item_effects_scale_with_duplicate_count():
+    """Always-on and timed effects multiply their amount by Amount Selector,
+    so duplicate item copies held in-game stack additively."""
+    from rsmm.engine import entity_check as CK
+    from rsmm.engine import entity_graph as EG
+    from rsmm.engine import entity_parts as P
+    _shield()
+    effs = [
+        {"stat": "Crit chance", "amount": 0.1},
+        {"stat": "Attack power", "amount": 0.2, "seconds": 5.0, "on": "dash"},
+    ]
+    files = C.build_magic_item(new_id="Stacking_Item", base_id="Increase_Shield",
+                               base_cooked=_shield(), corpus=[], rarity="Rare",
+                               effect=effs, super_effect=False)
+    ent = next(b for p, b in files.items() if p.endswith(".gen"))
+    g = EG.parse(ent)
+    comps = {c.name: c for c in g.components}
+
+    # Effect 1: Always-on bonus
+    op1 = comps["Crit Chance Value Operation Effect"]
+    assert op1.cls == "oCEntityCpntValueOperationsSettings"
+    op1_refs = [r.path for r in op1.refs]
+    assert "[Value] Stacking_Item\\Crit Chance Value Effect" in op1_refs
+    assert r"[Value Selector] Magical_Objects_Model\Amount Selector" in op1_refs
+    mod1 = comps["Crit Chance Modifier Effect"]
+    d1 = P.decode(mod1)
+    op_path = "[Multi values operations] Stacking_Item\\Crit Chance Value Operation Effect"
+    assert d1["amount"].source.path == op_path
+    assert d1["amount"].key == 0x17ae7811
+    assert struct.unpack("<f", d1["amount"].value)[0] == pytest.approx(0.1)
+
+    # Effect 2: Timed bonus after trigger
+    op2 = comps["Crit Chance Value Operation Effect 2"]
+    assert op2.cls == "oCEntityCpntValueOperationsSettings"
+    op2_refs = [r.path for r in op2.refs]
+    assert "[Value] Stacking_Item\\Crit Chance Value Effect 2" in op2_refs
+    assert r"[Value Selector] Magical_Objects_Model\Amount Selector" in op2_refs
+    mod2 = comps["Crit Chance Modifier Effect 2"]
+    d2 = P.decode(mod2)
+    op_path2 = "[Multi values operations] Stacking_Item\\Crit Chance Value Operation Effect 2"
+    assert d2["amount"].source.path == op_path2
+    assert d2["amount"].key == 0x17ae7811
+    assert struct.unpack("<f", d2["amount"].value)[0] == pytest.approx(0.2)
+
+    # Description format slots point to the operations
+    slots = _slots(ent)
+    assert slots[0] == ("Crit Chance Value Operation Effect", 1)
+    assert slots[1] == ("Crit Chance Value Operation Effect 2", 1)
+    assert slots[2] == ("Crit Chance Duration Value Effect 2", 0)
+
+    assert item_warnings(ent, _shield(), set()) == []
+    assert CK.check(ent, _shield(), name="Stacking_Item") == []
+
+
+def test_super_effects_do_not_scale_with_duplicate_count():
+    """Super effects only activate when reaching target copies, so they must NOT
+    scale their amount by Amount Selector."""
+    from rsmm.cli.editor.content import _built_slots
+    from rsmm.engine import entity_check as CK
+    from rsmm.engine import entity_graph as EG
+    from rsmm.engine import entity_parts as P
+    _shield()
+    supers = [
+        {"stat": "Crit chance", "amount": 0.05},
+        {"stat": "Attack power", "amount": 0.1, "seconds": 3.0, "on": "dash"},
+    ]
+    files = C.build_magic_item(new_id="Super_Item", base_id="Increase_Shield",
+                               base_cooked=_shield(), corpus=[], rarity="Rare",
+                               super_effects=supers)
+    ent = next(b for p, b in files.items() if p.endswith(".gen"))
+    g = EG.parse(ent)
+    comps = {c.name: c for c in g.components}
+
+    # Super effect components should NOT have Value Operation
+    assert "Crit Chance Value Operation Super Effect" not in comps
+    assert "Crit Chance Value Operation Super Effect 2" not in comps
+
+    # Modifiers should not have an external operation source
+    mod1 = comps["Crit Chance Modifier Super Effect"]
+    d1 = P.decode(mod1)
+    assert d1["amount"].source is None
+    assert struct.unpack("<f", d1["amount"].value)[0] == pytest.approx(0.05)
+
+    # Slots in Super Effect Descripton Format point directly to Values, not Operations
+    super_slots = [(s["node"], s["mode"])
+                   for s in _built_slots(ent, "Super Effect Descripton Format")]
+    assert super_slots[0] == ("Crit Chance Value Super Effect", 1)
+    assert super_slots[1] == ("Crit Chance Value Super Effect 2", 1)
+    assert super_slots[2] == ("Crit Chance Duration Value Super Effect 2", 0)
+
+    assert item_warnings(ent, _shield(), set()) == []
+    assert CK.check(ent, _shield(), name="Super_Item") == []
+
+
+def test_free_reroll_effect_encodes_as_integer_and_not_percent():
+    """Free Reroll is an integer stat: amount must be encoded as P.INT (type 1),
+    percent defaults to False so display mode is 0 (plain, not x100), and it
+    does not scale through float operations."""
+    from rsmm.cli.editor.content import _built_slots
+    from rsmm.engine import entity_check as CK
+    from rsmm.engine import entity_graph as EG
+    from rsmm.engine import entity_parts as P
+    from rsmm.engine.item_effect import Effect, describe
+
+    # 1. Parsing defaults percent to False and amount to int
+    e = Effect.parse({"stat": "Free Reroll", "amount": 1.0})
+    assert e.amount == 1
+    assert isinstance(e.amount, int)
+    assert e.percent is False
+    assert describe([e]) == "• #+{0}@ #Free Reroll@"
+
+    # 2. Super effect encoding (as Lucky Coin provides natively)
+    files = C.build_magic_item(new_id="Reroll_Super_Item", base_id="Increase_Shield",
+                               base_cooked=_shield(), corpus=[], rarity="Common",
+                               super_effects=[{"stat": "Free Reroll", "amount": 1}])
+    ent = next(b for p, b in files.items() if p.endswith(".gen"))
+    g = EG.parse(ent)
+    comps = {c.name: c for c in g.components}
+    mod = comps["Crit Chance Modifier Super Effect"]
+    d = P.decode(mod)
+    assert d["modifier_id"] == 0x1AA49D8D
+    assert d["amount"].type == P.INT
+    assert d["amount"].value == struct.pack("<i", 1)
+    assert d["amount"].unit == 0
+    assert d["amount"].source is None
+
+    slots = [(s["node"], s["mode"])
+             for s in _built_slots(ent, "Super Effect Descripton Format")]
+    assert slots[0] == ("Crit Chance Value Super Effect", 0)
+
+    assert item_warnings(ent, _shield(), set()) == []
+    assert CK.check(ent, _shield(), name="Reroll_Super_Item") == []
+
+    # 3. Always-on effect encoding scales by duplicate copies via integer operation
+    files2 = C.build_magic_item(new_id="Reroll_Passive_Item", base_id="Increase_Shield",
+                                base_cooked=_shield(), corpus=[], rarity="Common",
+                                effect=[{"stat": "Free Reroll", "amount": 2}])
+    ent2 = next(b for p, b in files2.items() if p.endswith(".gen"))
+    g2 = EG.parse(ent2)
+    comps2 = {c.name: c for c in g2.components}
+    op2 = comps2["Crit Chance Value Operation Effect"]
+    assert op2.cls == "oCEntityCpntValueOperationsSettings"
+    mod2 = comps2["Crit Chance Modifier Effect"]
+    d2 = P.decode(mod2)
+    assert d2["modifier_id"] == 0x1AA49D8D
+    assert d2["amount"].type == P.INT
+    assert d2["amount"].value == struct.pack("<i", 2)
+    op_path = r"[Multi values operations] Reroll_Passive_Item\Crit Chance Value Operation Effect"
+    assert d2["amount"].source.path == op_path
+    assert d2["amount"].key == 0x17AE780B
+
+    slots2 = _slots(ent2)
+    assert slots2[0] == ("Crit Chance Value Operation Effect", 0)
+    built2 = _built_slots(ent2, "Descripton Format")
+    assert built2[0]["value"] == 2.0
+    assert built2[0]["mode"] == 0
+    from rsmm.engine.entity_graph_edit import EntityFile
+    ef2 = EntityFile(ent2, "Reroll_Passive_Item")
+    c_fmt = ef2.component("Descripton Format")
+    fmt_slot = ef2._format_slots(c_fmt)[0][0]
+    assert struct.unpack("<I", c_fmt.body[fmt_slot.offset + 8:fmt_slot.offset + 12])[0] == 1
+
+    assert item_warnings(ent2, _shield(), set()) == []
+    assert CK.check(ent2, _shield(), name="Reroll_Passive_Item") == []

@@ -1,6 +1,51 @@
 {
-  "generated": "2026-10-23",
+  "generated": "2026-10-24",
   "entries": [
+    {
+      "version": "",
+      "date": "2026-10-24",
+      "summary": "In-game Mods menu support: mods switched on or off in Settings > Mods are carried into your library on the next launch, and the pause menu gets a Mods button. Integer item stats (free rerolls, charges) now show their real number on the card instead of +0.",
+      "highlights": [
+        "In-game Mods menu support: mods switched on or off in Settings > Mods are carried into your library on the next launch, and the pause menu gets a Mods button. Integer item stats (free rerolls, charges) now show their real number on the card instead of +0."
+      ],
+      "cli_version": 14
+    },
+    {
+      "version": "",
+      "date": "2026-10-24",
+      "summary": "In-game Mods menu: a Mods tab in the game's own Settings page (switch mods on or off for the next launch, change mod settings while you play) and a Mods button in the pause menu. Replaces the old drawn overlay.",
+      "highlights": [
+        "In-game Mods menu: a Mods tab in the game's own Settings page (switch mods on or off for the next launch, change mod settings while you play) and a Mods button in the pause menu. Replaces the old drawn overlay."
+      ],
+      "loader_version": 48
+    },
+    {
+      "version": "",
+      "date": "2026-10-24",
+      "summary": "Custom item effects now stack with duplicate copies: holding a second copy raises the stat and the card number (always-on and timed effects; super effects unchanged).",
+      "highlights": [
+        "Custom item effects now stack with duplicate copies: holding a second copy raises the stat and the card number (always-on and timed effects; super effects unchanged)."
+      ],
+      "cli_version": 13
+    },
+    {
+      "version": "",
+      "date": "2026-10-24",
+      "summary": "In-game mod menu: an ImGui panel drawn on the game's DX12 swapchain, painted onto the book. Adds R.debug.components.",
+      "highlights": [
+        "In-game mod menu: an ImGui panel drawn on the game's DX12 swapchain, painted onto the book. Adds R.debug.components."
+      ],
+      "loader_version": 47
+    },
+    {
+      "version": "",
+      "date": "2026-10-24",
+      "summary": "Supper Effect on Items and Always on Night/Day",
+      "highlights": [
+        "Supper Effect on Items and Always on Night/Day"
+      ],
+      "cli_version": 12
+    },
     {
       "version": "",
       "date": "2026-10-23",
@@ -483,56 +528,6 @@
         "Fixed: the camera mod and other mods that read or change your hero did nothing unless a hidden loader setting had been switched on by hand. Settings > Loader features now has a Hero capture switch, and a mod that needs it switches it on for you when you apply.",
         "Log: opens empty until a game is running, then shows that game live. Pick Last run or any earlier run in the list to read an old log.",
         "For mod makers: `loader_flags = [\"RSMM_ENABLE_HERO_CAPTURE\"]` in [mod] asks for hero capture while your mod is enabled."
-      ]
-    },
-    {
-      "version": "5.9.8",
-      "date": "2026-10-06",
-      "summary": "Talent builder: give one talent another talent's effect, and the Log no longer calls a finished game the current run.",
-      "highlights": [
-        "Talent builder: \"Also gives the effect of\" on a card makes owning that talent also run another of the same hero's talents. Tested in game: Scarlet's Shapeshifter with Short Wick's bomb that explodes as soon as it lands.",
-        "Talent builder: the \"... Count\" stats are now labelled as tallies (\"defensive objects held\") and listed apart. They count things for other effects and do nothing on their own.",
-        "Fixed: the Log screen said \"Current run\" when no game was running. It now says \"Last run\", and notices a game started from Steam."
-      ]
-    },
-    {
-      "version": "5.9.7",
-      "date": "2026-10-06",
-      "summary": "Mods you switch off in the Library now really stay off, and the talent builder learns \"for a while after an ability\".",
-      "highlights": [
-        "Fixed: mods switched off in the Library were still installed when you launched the game. The Library is now what decides; mods in your profile folder that the Library shows as off are turned off before launch.",
-        "Talent builder: an added stat can now apply \"For a while after\" an ability, e.g. +25% damage for 3 seconds after POWER. Each use restarts the time.",
-        "Talent builder: stats are found by the words on the cards (\"trait cooldown\", \"power charge\"), and stats that would debuff your own hero (Ignite, Vulnerable, Rooted...) are greyed out.",
-        "Fixed: a talent with two added stats failed to build.",
-        "Editor: game-state values like \"Is in cinematic\" are no longer offered as stats, and \"Reset everything\" also clears test grants."
-      ]
-    },
-    {
-      "version": "5.9.6",
-      "date": "2026-10-05",
-      "summary": "Fixes Launch on Linux, which started neither Steam nor the game.",
-      "highlights": [
-        "Fixed (Linux): Launch did nothing. The app reported the game as started, but Steam and the game never opened. It now starts Steam properly, and if one way of reaching Steam fails it tries the next and tells you what went wrong."
-      ]
-    },
-    {
-      "version": "",
-      "loader_version": 27,
-      "date": "2026-10-05",
-      "summary": "Loader v27: logs why the game's WinHTTP calls fail (error code + which winhttp_real.dll is loaded) instead of claiming the backend redirect worked. Diagnostic for Windows players who see no party code on a self-hosted server.",
-      "highlights": [
-        "Loader v27: logs why the game's WinHTTP calls fail (error code + which winhttp_real.dll is loaded) instead of claiming the backend redirect worked. Diagnostic for Windows players who see no party code on a self-hosted server."
-      ]
-    },
-    {
-      "version": "5.9.5",
-      "date": "2026-10-05",
-      "summary": "Play on a community-hosted online server in one step, from Settings or with one command.",
-      "highlights": [
-        "New: Settings > Game > Online server. Paste the address the host gave you and the app sets everything up, including installing or updating the loader when needed.",
-        "The same from the command line: `rsmm backend http://host:port` (and `rsmm backend off` to go back to the official servers). No more setx or Steam restarts.",
-        "Shows whether the server answers and whether your last game launch actually used it.",
-        "Fixed: `rsmm update-loader` said \"up to date\" when the game folder had no loader at all. It now says so."
       ]
     }
   ]

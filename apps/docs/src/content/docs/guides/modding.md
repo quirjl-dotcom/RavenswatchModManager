@@ -1163,8 +1163,42 @@ effects = [
   frame (name, icon, quality, card, its own save id) and every part an effect
   needs (modifier, timer, tester, trigger listener). A game patch that changes
   some shipped item does not change yours. The only shipped file it reads is
-  the magical-object model every item inherits. It has no super effect, and
-  with no `name` it is named after its id.
+  the magical-object model every item inherits. With no `name` it is named
+  after its id; it has no super effect unless `super_effects` gives it one.
+
+### Super effects (`super_effects`)
+
+A super effect is what an item does once the hero holds enough copies of it:
+5 of a Common, 4 of a Rare, 3 of an Epic (the card's "x3"; some effects lower
+it). Different items of the same rarity do not count. The game then switches
+the item's super-effect state on, and the card's second paragraph describes it. `super_effects` takes the same tables
+as `effects` (always on, or timed after a trigger) and runs them from that
+state instead:
+
+```toml
+[[content]]
+kind          = "item"
+id            = "Wanderers_Charm"
+rarity        = "Rare"
+effects       = [{ stat = "Crit chance", amount = 0.1 }]
+super_effects = [
+  { stat = "Attack power", amount = 0.2 },
+  { stat = "Crit damage", amount = 0.3, seconds = 4, on = "dash" },
+]
+```
+
+- Works on a blank item and on a copy (or `mode = "replace"`) of any shipped
+  item. A base's own super effect is replaced; an item without one (a
+  legendary copied down to Rare) gets one.
+- **Common, Rare and Epic only.** A Legendary, Cursed or Power-up item has no
+  copy target, so it never switches one on; the build refuses it.
+- With no `super_description` the super text is written from them, numbered
+  from `{0}` like `description`, as one line.
+- **Write super text as one line, without `•`.** No shipped super text has a
+  bullet or a line break, and the card prints a bulleted one as `???`.
+- `super_effect = false` and `super_effects` contradict each other: give one.
+- In the editor, each item has a **Super effect** section with the same rows
+  as **What it does**.
 
 A **talent** takes the same `stats` table, next to its `file` (effect names
 repeat across a hero's files):

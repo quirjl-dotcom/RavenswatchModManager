@@ -34,6 +34,7 @@ export interface MailMessage {
   subject: string;
   text: string;
   html?: string;
+  headers?: Record<string, string>;
 }
 
 export async function sendMail(msg: MailMessage): Promise<void> {
@@ -55,6 +56,7 @@ export async function sendMail(msg: MailMessage): Promise<void> {
     subject: msg.subject,
     text: msg.text,
     html: msg.html,
+    headers: msg.headers,
   });
 }
 
@@ -65,6 +67,18 @@ function htmlEscape(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+/**
+ * Better Auth redirects to the link's `callbackURL` after verifying, and to
+ * `/` on ITS OWN host (the API) when there is none — which is what sign-up
+ * sends, from both the website and the desktop app. Give such links the
+ * website as their destination; a caller-chosen callbackURL is kept.
+ */
+export function withVerifyCallback(url: string, fallback: string): string {
+  const u = new URL(url);
+  if (!u.searchParams.get('callbackURL')) u.searchParams.set('callbackURL', fallback);
+  return u.toString();
 }
 
 export function verifyEmailTemplate(args: { name: string; url: string }): {

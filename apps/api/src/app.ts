@@ -9,6 +9,7 @@ import { bearerToken, isTokenRoute } from './api-tokens.js';
 import { getAuth } from './auth.js';
 import { env, githubConfigured, googleConfigured, isProduction } from './env.js';
 import { errString, log, requestId } from './logger.js';
+import { verifyUnsubscribeToken } from './notify.js';
 import { createRateLimiter } from './rate-limit.js';
 import { collectionsRouter } from './routes/collections.js';
 import { cronRouter } from './routes/cron.js';
@@ -166,15 +167,16 @@ app.use('*', async (c, next) => {
  * split by credentials at the CDN and must stay uncached. Mod / user /
  * collection / guide DETAIL pages read the viewer (owner's in-review versions,
  * canManage, isFollowing, takedown visibility) and are deliberately absent;
- * adding one here would serve one viewer's view to everyone. Requests with an
- * Authorization header are never cached by Vercel regardless.
+ * adding one here would serve one viewer's view to everyone. Review lists are
+ * absent too: a reviewer refetches right after posting and a cached list hid
+ * their own review for up to minutes. Requests with an Authorization header
+ * are never cached by Vercel regardless.
  *
  * Vercel-CDN-Cache-Control is consumed by Vercel's CDN and not forwarded, so
  * browsers keep revalidating.
  */
 const CDN_CACHEABLE = [
   /^\/api\/mods$/,
-  /^\/api\/mods\/[^/]+\/reviews$/,
   /^\/api\/collections$/,
   /^\/api\/guides$/,
   /^\/api\/legal\/impressum$/,
@@ -267,6 +269,22 @@ app.get('/api/auth-config', (c) =>
 // Scheduled scan-queue drain (Vercel Cron → Bearer CRON_SECRET). Self-gates on
 // the secret; no session/cookie involved.
 app.route('/api/cron', cronRouter);
+
+// Review-email unsubscribe link. GET is the link in the mail body, POST is the
+// mail client's RFC 8058 one-click (List-Unsubscribe-Post). Token is an HMAC of
+// the user id, so no session is needed.
+app.on(['GET', 'POST'], '/api/unsubscribe', async (c) => {
+  const userId = c.req.query('u') ?? '';
+  const token = c.req.query('t') ?? '';
+  if (!userId || !verifyUnsubscribeToken(userId, token)) {
+    return c.text('This unsubscribe link is invalid.', 400);
+  }
+  await getDb()
+    .update(schema.users)
+    .set({ emailReviews: false, updatedAt: new Date() })
+    .where(eq(schema.users.id, userId));
+  return c.text('You will no longer get review emails. Turn them back on under Account → Privacy.');
+});
 
 app.route('/api/mods', modsRouter);
 app.route('/api/moderation', moderationRouter);

@@ -61,6 +61,15 @@ LOADER_FLAGS: list[dict[str, Any]] = [
         "safe": True,
     },
     {
+        "name": "RSMM_DISABLE_NATIVE_MENU",
+        "label": "Disable the in-game Mods menu",
+        "description": "Remove the Mods tab from the game's Settings page and "
+                       "the Mods button from the pause menu. They let you switch "
+                       "mods on or off (applied the next time you launch) and "
+                       "change their settings while you play.",
+        "safe": True,
+    },
+    {
         "name": "RSMM_ENABLE_HERO_CAPTURE",
         "label": "Hero capture",
         "description": "Find your hero in memory so mods can read and change "

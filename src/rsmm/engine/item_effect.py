@@ -35,9 +35,10 @@ from .entity_graph_edit import EntityEditError, EntityFile
 
 #: Part names, kept from the recipe the parts were first copied from so a mod's
 #: ``steps`` that name them keep working: (tester, timer, modifier, seconds
-#: value, amount value).
+#: value, amount value, amount x copies operation).
 _TIMED = ("Crit Chance Modifier Active Tester", "Crit Chance Modifier Timer",
-          "Crit Chance Modifier", "Crit Chance Duration Value", "Crit Chance Value")
+          "Crit Chance Modifier", "Crit Chance Duration Value", "Crit Chance Value",
+          "Crit Chance Value Operation")
 _TRIGGER_STATE = "On Trigger"
 
 #: The game event every ability use sends; its flag filter says which ability.
@@ -97,6 +98,15 @@ TRIGGERS = {
                       slots=("ref_4", "ref_5"), flags=0x1, group="Reroll From Code"),
 }
 
+#: Continuous day/night conditions: global bool keys read by Character_Common's
+#: "Is Daytime Tester" and "Is Nighttime Tester" (which hold State Daytime and
+#: State Nighttime on for Scarlet and Piper).
+_IS_DAYTIME, _IS_NIGHTTIME = 0x17d8d89b, 0x17d8d89c
+DURING = {
+    "day": ("Active only during day", "During the day", _IS_DAYTIME),
+    "night": ("Active only during night", "During the night", _IS_NIGHTTIME),
+}
+
 #: Accessor keys a value picker reads another part through (``items.md``): a
 #: Timer's time left, a listener's "fired", a GetValue's value.
 _TIMER_LEFT, _LISTENER_FIRED, _GOT_VALUE = 0x16831980, 0x12e4a37e, 0x16abf2eb
@@ -118,11 +128,13 @@ class ItemEffectError(ValueError):
 class Effect:
     """One effect. Without ``seconds`` it is ALWAYS ON while the item is held
     (a plain stat item's shape: a modifier on the equipped state's
-    ``while_active``); with ``seconds`` it is a timed bonus after ``on``."""
+    ``while_active``, or gated by ``during``); with ``seconds`` it is a timed
+    bonus after ``on``."""
     stat: str
-    amount: float
+    amount: float | int
     seconds: float | None = None
     on: str | None = None
+    during: str | None = None
     refresh: bool = True
     percent: bool = True        # the card shows the amount x100 with a %
     keep_base_effect: bool = False
@@ -147,7 +159,12 @@ class Effect:
             IM.resolve_stat(raw["stat"])
         except IM.ItemModifierError as e:
             raise ItemEffectError(f"effect stat: {e}") from None
-        timed = "seconds" in raw or "on" in raw
+        during = str(raw["during"]) if raw.get("during") is not None else None
+        if during is None and "seconds" not in raw and raw.get("on") in DURING:
+            during = str(raw["on"])
+        if during is not None and during not in DURING:
+            raise ItemEffectError(f"effect during = {during!r}: one of {', '.join(DURING)}")
+        timed = "seconds" in raw or ("on" in raw and raw.get("on") not in DURING)
         if timed and "seconds" not in raw:
             raise ItemEffectError("effect: a trigger ('on') needs 'seconds' (how long the "
                                   "bonus lasts); leave both out for an always-on bonus")
@@ -162,9 +179,12 @@ class Effect:
         for k in ("refresh", "percent", "keep_base_effect"):
             if k in raw and not isinstance(raw[k], bool):
                 raise ItemEffectError(f"effect {k} must be true or false")
-        return cls(stat=str(raw["stat"]), amount=float(raw["amount"]),
-                   seconds=float(raw["seconds"]) if timed else None, on=on,
-                   refresh=raw.get("refresh", True), percent=raw.get("percent", True),
+        is_int = IM.is_integer_stat(raw["stat"])
+        amount = int(round(raw["amount"])) if is_int else float(raw["amount"])
+        percent = raw.get("percent", not is_int)
+        return cls(stat=str(raw["stat"]), amount=amount,
+                   seconds=float(raw["seconds"]) if timed else None, on=on, during=during,
+                   refresh=raw.get("refresh", True), percent=percent,
                    keep_base_effect=raw.get("keep_base_effect", False))
 
 
@@ -213,16 +233,82 @@ def apply_effects(ent: bytes, item_id: str, effects: list[Effect], *, read=None)
             w = P.PartWriter(ef, f"effect:{item_id}:{i}")
             sfx = _suffix(i)
             if effect.timed:
-                timer = _add_timed(w, effect, sfx, equipped, read, slots)
+                timer = _add_timed(w, effect, sfx, equipped, read, slots, scale=True)
                 first_timer = first_timer or (timer, effect.seconds)
             else:
-                _add_passive(w, effect, sfx, equipped, slots)
+                _add_passive(w, effect, sfx, equipped, slots, scale=True)
         _card_slots(ef, slots)
         if first_timer is not None:
             _cooldown_display(ef, *first_timer)
     except (EntityEditError, P.PartError) as e:
         raise ItemEffectError(f"effect: {e}") from e
     return ef.to_bytes()
+
+
+#: Part-name suffix of a super effect's parts (" Super Effect", " Super Effect
+#: 2"...): the name marks their modifiers as the super effect's
+#: (``item_modifier.list_modifiers``), and keeps them apart from ``effects``'.
+SUPER_SUFFIX = " Super Effect"
+#: The rarities with a super effect, and how many copies of the item switch it
+#: on. The model's `Equiped Super Effect Active Condition` holds `State Super
+#: Effect` on while the item is equipped and its own amount (Dt Magical Object,
+#: key 0x18a38678: the copies held, what `Amount Selector` scales card numbers
+#: by) is at least `Super Effect Target Count Operation`: 5 / 4 / 3 by its Is
+#: Common / Is Rare / Is Epic tests, minus whatever lowers it. Any other rarity
+#: gets 0, and `Has Super Effect Condition` (target > 0) then fails: never on.
+#: Different items of one rarity do not count (playtest 2026-10-24: the item
+#: plus two other Epics left it off).
+SUPER_COPIES = {"Common": 5, "Rare": 4, "Epic": 3}
+SUPER_RARITIES = tuple(SUPER_COPIES)
+SUPER_RARITIES = ("Common", "Rare", "Epic")
+
+
+def apply_super_effects(ent: bytes, item_id: str, effects: list[Effect], *,
+                        read=None) -> bytes:
+    """``ent`` (an item entity, already renamed to ``item_id``) with ``effects``
+    as its SUPER effect: what it does once the hero holds enough copies of the
+    item (``SUPER_COPIES``), when the model switches the item's ``Child State
+    Super Effect`` on. They are built as ``effects`` are, run from that state instead
+    of the equipped one, and numbered on the super text (``{0}``, ``{1}``...).
+    The base's own super effect is cut. An item without the model's super slots
+    (a blank item, a copy of a legendary) gets them, its text read from
+    ``<item_id>_SuperEffect``."""
+    from . import entity_check as CK
+    from . import item_frame as F
+    read = read or CK._corpus_reader
+    ef = EntityFile(ent, item_id)
+    slots: list[tuple[str, bool]] = []
+    try:
+        state = _override_of(ef, F.SUPER_STATE)
+        has_text = _override_of(ef, F.SUPER_FORMAT) is not None
+        if state is None or not has_text:
+            F.add_super(P.PartWriter(ef, f"super:{item_id}"), read, f"{item_id}_SuperEffect",
+                        state=state is None, text=not has_text)
+            state = state or F.SUPER_STATE
+        f = next(x for x in EF.fields(ef.component(state)) if x.name == "while_active")
+        for i in reversed(range(len(f.items))):         # the base's own super effect
+            ef.remove_ref(state, "while_active", i)
+        ef.clear_format_slots(F.SUPER_FORMAT)
+        for i, effect in enumerate(effects):
+            w = P.PartWriter(ef, f"super:{item_id}:{i}")
+            sfx = SUPER_SUFFIX if i == 0 else f"{SUPER_SUFFIX} {i + 1}"
+            if effect.timed:
+                _add_timed(w, effect, sfx, state, read, slots)
+            else:
+                _add_passive(w, effect, sfx, state, slots)
+        for value, percent in slots:
+            ef.add_format_slot(F.SUPER_FORMAT, value, percent=percent)
+    except (EntityEditError, P.PartError, F.FrameError) as e:
+        raise ItemEffectError(f"super effect: {e}") from e
+    return ef.to_bytes()
+
+
+def _override_of(ef: EntityFile, model_part: str) -> str | None:
+    """The item's part overriding the model's ``model_part``, or None."""
+    for c in ef.graph().components:
+        if c.override is not None and c.override.path.endswith("\\" + model_part):
+            return c.name
+    return None
 
 
 _MOD = "oCEntityCpntModifierSettings"
@@ -239,9 +325,33 @@ _NONE = P.Link()
 #: proven parts.
 _RATIO = 2
 
+_OPS = "oCEntityCpntValueOperationsSettings"
+_MULTIPLY = 0x17b29be2
+_READ_VALUE = 0x0fd2c964
+_READ_INT = 0x0fd2c965
+_AMOUNT_SELECTOR = P.Link(bytes.fromhex("ff9e14f8f4505d4890d387548a6c8f81"),
+                          r"[Value Selector] Magical_Objects_Model\Amount Selector")
 
-def _value(w: P.PartWriter, name: str, v: float, unit: int = 0) -> None:
-    w.add(_VALUE, name, {"value": P.Num.f32(v, unit), "flag": 0}, flags=0x101)
+
+def _value(w: P.PartWriter, name: str, v: float | int, unit: int = 0) -> P.Link:
+    val = P.Num.int(int(v)) if isinstance(v, int) else P.Num.f32(v, unit)
+    return w.add(_VALUE, name, {"value": val, "flag": 0}, flags=0x101)
+
+
+def _scalable_operation(w: P.PartWriter, name: str, value_link: P.Link,
+                        *, is_int: bool = False) -> P.Link:
+    """``value_link`` x ``Amount Selector``, so duplicate item copies stack: the
+    modifier and the card both read it (playtest 2026-10-24: stat and card number
+    grew with a second copy, always-on and timed)."""
+    def operand(link: P.Link, key: int, num_type: int) -> bytes:
+        return struct.pack("<Ii", 0, -1) + P.num_bytes(
+            P.Num(num_type, bytes(4), source=link, key=key), w.ci)
+    read_key = _READ_INT if is_int else _READ_VALUE
+    num_type = P.INT if is_int else P.F32
+    node = w.obj("oCEntityCpntNodeSettings", struct.pack("<II", _MULTIPLY, 2)
+                 + operand(value_link, read_key, num_type)
+                 + operand(_AMOUNT_SELECTOR, _READ_INT, P.INT))
+    return w.add(_OPS, name, {"operations": node}, flags=0x101)
 
 
 def _owner(w: P.PartWriter, last: int) -> int:
@@ -251,11 +361,19 @@ def _owner(w: P.PartWriter, last: int) -> int:
                  on + b"\x00" + w.obj("oCResourceWeakRef", bytes(8)) + bytes([last]))
 
 
-def _modifier(w: P.PartWriter, name: str, stat: str, amount: float) -> P.Link:
+def _modifier(w: P.PartWriter, name: str, stat: str, amount: float | int,
+              source: P.Link | None = None) -> P.Link:
     """A modifier giving ``amount`` of ``stat`` to whoever holds the item."""
+    if IM.is_integer_stat(stat):
+        key = 0x17ae780b if source is not None else None
+        num = (P.Num.int(int(amount)) if source is None
+               else P.Num(P.INT, struct.pack("<i", int(amount)), 0, source=source, key=key))
+    else:
+        num = (P.Num.f32(amount, _RATIO) if source is None
+               else P.Num(P.F32, struct.pack("<f", amount), _RATIO, source=source, key=0x17ae7811))
     return w.add(_MOD, name, {
         "modifier_id": IM.resolve_stat(stat), "duration": P.Num.f32(0),
-        "amount": P.Num.f32(amount, _RATIO),
+        "amount": num,
         "targets": w.ids("oCEntityCollectorSelectorSettings", [_owner(w, 1)]),
         "value_4": P.Num.f32(1), "sources?": w.ids("oCEntityCollectorSelectorSettings", []),
         "id": P.Num.int(0), "flag": 1}, flags=0x1)
@@ -267,6 +385,14 @@ def _float_test(w: P.PartWriter, source: P.Link, key: int) -> int:
               + w.obj(P.UNION, struct.pack("<II", P.F32, 0) + bytes(4)))
     b = w.obj(P.VALUE_PICKER, b"\x00" + w.obj(P.UNION, struct.pack("<II", P.F32, 0) + bytes(4)))
     return w.sub("oCEntityCpntFloatTestSettings", a + b + struct.pack("<I", 2))
+
+
+def _bool_test(w: P.PartWriter, key: int) -> int:
+    """A condition: global bool ``key`` is true, as Character_Common's
+    Is Daytime Tester and Is Nighttime Tester check it."""
+    return w.sub("oCEntityCpntSimpleBoolTestSettings",
+                 P.num_bytes(P.Num(P.BOOL, b"\x00", key=key, glob=True), w.ci)
+                 + struct.pack("<I", 0))
 
 
 def _tester(w: P.PartWriter, name: str, tests: list[int], *, every: bool, flags: int,
@@ -281,31 +407,52 @@ def _tester(w: P.PartWriter, name: str, tests: list[int], *, every: bool, flags:
 
 
 def _add_passive(w: P.PartWriter, effect: Effect, sfx: str, equipped: str,
-                 slots: list) -> None:
-    """A modifier held on while the item is equipped, as a plain stat item's."""
-    _tester_n, _timer_n, mod, _seconds_n, amount = (n + sfx for n in _TIMED)
-    _modifier(w, mod, effect.stat, effect.amount)
-    _value(w, amount, effect.amount, _RATIO)
-    w.ef.add_ref(equipped, "while_active", mod)
-    slots.append((amount, effect.percent))
+                 slots: list, *, scale: bool = False) -> None:
+    """A modifier held on while the item is equipped (or while ``during`` holds)."""
+    tester, _timer_n, mod, _seconds_n, amount, op = (n + sfx for n in _TIMED)
+    is_int = IM.is_integer_stat(effect.stat)
+    amount_link = _value(w, amount, effect.amount, 0 if is_int else _RATIO)
+    if scale:
+        op_link = _scalable_operation(w, op, amount_link, is_int=is_int)
+        mod_link = _modifier(w, mod, effect.stat, effect.amount, source=op_link)
+        slot_node = op
+    else:
+        mod_link = _modifier(w, mod, effect.stat, effect.amount)
+        slot_node = amount
+    if effect.during:
+        _tester(w, tester, [_bool_test(w, DURING[effect.during][2])], every=False,
+                flags=0x1, holds=mod_link)
+        w.ef.add_ref(equipped, "while_active", tester)
+    else:
+        w.ef.add_ref(equipped, "while_active", mod)
+    slots.append((slot_node, effect.percent))
 
 
 def _add_timed(w: P.PartWriter, effect: Effect, sfx: str, equipped: str, read,
-               slots: list) -> str:
-    tester, timer, mod, seconds, amount = (n + sfx for n in _TIMED)
+               slots: list, *, scale: bool = False) -> str:
+    tester, timer, mod, seconds, amount, op = (n + sfx for n in _TIMED)
     state = _TRIGGER_STATE + sfx
     # The modifier and timer carry their numbers INLINE: linked to Value parts
     # they read the donor's inline numbers instead (0.05 and 3 s for every
     # trigger, playtest 2026-10-20). The Values are only the card's numbers.
     _value(w, seconds, effect.seconds)
-    _value(w, amount, effect.amount, _RATIO)
-    mod_link = _modifier(w, mod, effect.stat, effect.amount)
+    is_int = IM.is_integer_stat(effect.stat)
+    amount_link = _value(w, amount, effect.amount, 0 if is_int else _RATIO)
+    if scale:
+        op_link = _scalable_operation(w, op, amount_link, is_int=is_int)
+        mod_link = _modifier(w, mod, effect.stat, effect.amount, source=op_link)
+        slot_node = op
+    else:
+        mod_link = _modifier(w, mod, effect.stat, effect.amount)
+        slot_node = amount
     timer_link = w.add(_TIMER, timer, {
         "bias?": P.Num.f32(0), "count": P.Num.int(1), "on_tick": _NONE, "on_end": _NONE,
         "state": _NONE, "paused?": P.Num(P.BOOL, b"\x00"), "duration": P.Num.f32(effect.seconds),
         "flag": 0, **_timer_tail(w)}, flags=0x1)
-    _tester(w, tester, [_float_test(w, timer_link, _TIMER_LEFT)], every=False, flags=0x1,
-            holds=mod_link)
+    tests = [_float_test(w, timer_link, _TIMER_LEFT)]
+    if effect.during:
+        tests.append(_bool_test(w, DURING[effect.during][2]))
+    _tester(w, tester, tests, every=len(tests) > 1, flags=0x1, holds=mod_link)
     w.add(_STATE, state, {
         "activates": [timer_link], "deactivates?": [timer_link] if effect.refresh else [],
         "list_2": [], "on_exit?": [], "disables_while_active?": [], "on_enter?": [],
@@ -314,7 +461,7 @@ def _add_timed(w: P.PartWriter, effect: Effect, sfx: str, equipped: str, read,
     listener = add_listener(w, effect.on, sfx, w.link(state, _STATE), read=read)
     w.ef.add_ref(equipped, "while_active", listener)
     w.ef.add_ref(equipped, "while_active", tester)
-    slots += [(amount, effect.percent), (seconds, False)]
+    slots += [(slot_node, effect.percent), (seconds, False)]
     return timer
 
 
@@ -372,20 +519,31 @@ def _alive_check(w: P.PartWriter, name: str, listener: str, then: P.Link, sfx: s
     return _tester(w, name, tests, every=True, flags=0x10001, on_true=then)
 
 
-def describe(effects: list[Effect]) -> str:
+def describe(effects: list[Effect], *, one_line: bool = False) -> str:
     """Card text for ``effects``, numbered as `apply_effects` lays out the card:
-    "#+{0}%@ #Crit chance@" for an always-on bonus, "After dashing, gain
-    #+{1}%@ #Attack power@ for #{2}@ seconds" for a timed one. One bullet each, as
-    the shipped cards write several effects."""
+    "#+{0}%@ #Crit chance@" for an always-on bonus, "During the day, #+{0}%@
+    #Crit chance@" for a day/night one, and "After dashing, gain #+{1}%@ #Attack
+    power@ for #{2}@ seconds" for a timed one. One bullet each, as the shipped
+    cards write several effects; ``one_line`` joins them with ", " instead, as
+    super text must be: no shipped super text has a bullet or a line break,
+    and the card printed a bulleted one as "???" (playtest 2026-10-24)."""
     lines, n = [], 0
     for e in effects:
         amount = f"#+{{{n}}}{'%' if e.percent else ''}@ #{e.stat}@"
         if e.timed:
-            lines.append(f"{TRIGGERS[e.on].text}, gain {amount} for #{{{n + 1}}}@ seconds")
+            head = (f"{DURING[e.during][1]}, {TRIGGERS[e.on].text.lower()}"
+                    if e.during else TRIGGERS[e.on].text)
+            lines.append(f"{head}, gain {amount} for #{{{n + 1}}}@ seconds")
             n += 2
+        elif e.during:
+            lines.append(f"{DURING[e.during][1]}, {amount}")
+            n += 1
         else:
             lines.append(amount)
             n += 1
+    if one_line:
+        return ", ".join(line if not i else line[0].lower() + line[1:]
+                         for i, line in enumerate(lines))
     return "\n".join("• " + line for line in lines)
 
 

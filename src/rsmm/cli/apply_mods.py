@@ -1907,7 +1907,10 @@ def _run_deactivation_hooks(mods: list[Mod],
 
 
 _RUNTIME_EXTENSIONS = {".lua", ".json", ".toml", ".txt"}
-_RUNTIME_BLOCKLIST  = {"manifest.toml", "config_schema.toml"}
+# manifest.toml is synced on its own (always). config_schema.toml IS synced:
+# the loader's in-game Settings > Mods tab (hook_settings_menu) draws each
+# mod's fields from the installed copy, the only one it can see.
+_RUNTIME_BLOCKLIST  = {"manifest.toml"}
 
 
 def _sync_one_file(src: Path, dst: Path, dry_run: bool) -> bool:
@@ -1929,8 +1932,8 @@ def _sync_mod_manifests(mods: list[Mod], game_dir: Path, dry_run: bool) -> int:
     """Copy each mod's runtime sidecar files into the game's mods/ dir.
 
     Always copied: manifest.toml + init.lua (when enabled).
-    Also copied: any top-level `.lua`, `.json`, `.toml`, `.txt` file that
-    is not the manifest or config schema — lets Lua mods ship pointer
+    Also copied: any top-level `.lua`, `.json`, `.toml`, `.txt` file other
+    than the manifest (the config schema included) — lets Lua mods ship pointer
     tables, data caches, or auxiliary scripts and read them via
     `R.mod_dir()` at runtime.
 
@@ -2443,6 +2446,14 @@ def cmd_apply(args, repo: Path, cooking: Path, game_dir: Path) -> int:
         game_dir, args.dry_run,
         page=encoded_to_dest(page_enc, cooking, game_dir) if page_enc else None,
         page_owner=page_owner)
+    # The pause menu's Mods button follows the loader's native menu flag.
+    from rsmm.engine.escape_menu import MENU_DECODED, sync_escape_menu
+    menu_enc = dec2enc.get(MENU_DECODED)
+    versiondef_changes += sync_escape_menu(
+        game_dir, args.dry_run,
+        menu=encoded_to_dest(menu_enc, cooking, game_dir) if menu_enc else None,
+        menu_owner=(state.active.get(menu_enc, {}).get("mod")
+                    or next((m for e, _s, _d, m in additions if e == menu_enc), None)))
 
     # Sync manifests so game knows which mods are enabled
     manifest_syncs = _sync_mod_manifests(mods, game_dir, args.dry_run)
@@ -2981,6 +2992,11 @@ def main() -> int:
         return 1
     if args.list:
         return cmd_list(args, repo, cooking)
+
+    if not args.dry_run:
+        from rsmm.cli.cmd_mods import consume_menu_requests
+        for line in consume_menu_requests(game_dir, MODS_DIR):
+            print(f"  [menu] {line}")
 
     # Compatibility graph: refuse to apply on hard conflict / cycle /
     # unmet require unless the user passes --force.

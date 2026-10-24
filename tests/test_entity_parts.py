@@ -126,14 +126,14 @@ def test_an_item_built_from_effects_names_no_other_item():
 
 # --- the frame an item with no base is written on ------------------------------
 
-def _blank(item_id: str, effects) -> bytes:
+def _blank(item_id: str, effects, super_effects=None) -> bytes:
     from rsmm.engine import item_frame
     from rsmm.engine.entity_check import _corpus_reader
     _shield()
     files = C.build_magic_item(new_id=item_id, base_id=item_frame.FRAME_ID,
                                base_cooked=item_frame.build(_corpus_reader), corpus=[],
                                rarity="Rare", effect=effects, remint_identity=True,
-                               name="x", description="x")
+                               name="x", description="x", super_effects=super_effects)
     return next(b for p, b in files.items() if p.endswith(".EntitySettingsResource.gen"))
 
 
@@ -170,3 +170,80 @@ def test_two_blank_items_get_their_own_identity_and_save_id():
     b = _blank("Charm_Two", [{"stat": "Crit chance", "amount": 0.1}])
     assert C.find_type_guid(a) != C.find_type_guid(b)
     assert C.find_identity_guid(a, "Charm_One") != C.find_identity_guid(b, "Charm_Two")
+
+
+@pytest.mark.parametrize(("during", "shipped_tester"), [
+    ("day", "Is Daytime Tester"),
+    ("night", "Is Nighttime Tester"),
+])
+def test_day_and_night_bool_tests_match_character_common(during, shipped_tester):
+    """The day/night bool test is byte for byte Character_Common's Is Daytime
+    Tester / Is Nighttime Tester sub-object (which Scarlet and Piper read)."""
+    cc = corpus.read(
+        "EntitySettings/Character_Common/Character_Common.entity.ot.EntitySettingsResource.gen")
+    if cc is None:
+        pytest.skip("Character_Common not available")
+
+    def sub_norm(raw: bytes, comp_name: str):
+        ef = EntityFile(raw, "x")
+        c = ef.component(comp_name)
+        v = P.decode(c)
+        sub_id = struct.unpack_from("<I", v["test"], 14)[0]
+        raw_sub = bytes(ef.objects[sub_id])
+        names = [k.name for k in ef.cf.classes]
+        out, i = names[struct.unpack_from("<I", raw_sub, 0)[0]].encode(), 4
+        while (j := raw_sub.find(cooked.MARK_BEGIN, i)) >= 0:
+            ci = struct.unpack_from("<I", raw_sub, j + 4)[0]
+            out += raw_sub[i:j + 4] + names[ci].encode()
+            i = j + 8
+        return out + raw_sub[i:]
+
+    built = _build([{"stat": "Crit chance", "amount": 0.2, "during": during}])
+    assert (sub_norm(built, "Crit Chance Modifier Active Tester" + IE.SUFFIX)
+            == sub_norm(cc, shipped_tester))
+
+# --- super effects ---------------------------------------------------------------
+
+def _super_state_refs(ent: bytes, item_id: str) -> list[str]:
+    from rsmm.engine import entity_fields as EF
+    ef = EntityFile(ent, item_id)
+    f = next(x for x in EF.fields(ef.component("Child State Super Effect"))
+             if x.name == "while_active")
+    return [i.text.rstrip().rsplit("\\", 1)[-1] for i in f.items]
+
+
+def test_a_blank_item_gets_the_models_super_slots_and_runs_its_super_effects():
+    from rsmm.engine import entity_check as CK
+    from rsmm.engine import item_modifier as IM
+    supers = [{"stat": "Attack power", "amount": 0.2},
+              {"stat": "Crit damage", "amount": 0.3, "seconds": 4, "on": "dash"}]
+    ent = _blank("Super_Charm", [{"stat": "Crit chance", "amount": 0.1}], supers)
+    over = {c.name: c.override.path for c in EG.parse(ent).components if c.override}
+    assert over["Child State Super Effect"].endswith("\\Child State Super Effect")
+    assert over["Super Effect Descripton Format"].endswith("\\Super Effect Descripton Format")
+    assert IM.super_text_key(ent) == "Super_Charm_SuperEffect"
+    mods = {m.name: m.super_effect for m in IM.list_modifiers(ent)}
+    assert mods == {"Crit Chance Modifier Effect": False,
+                    "Crit Chance Modifier Super Effect": True,
+                    "Crit Chance Modifier Super Effect 2": True}
+    # The always-on one is held by the super state; the timed one listens there.
+    assert set(_super_state_refs(ent, "Super_Charm")) == {
+        "Crit Chance Modifier Super Effect", "On Dash Event Listener Super Effect 2",
+        "Crit Chance Modifier Active Tester Super Effect 2"}
+    ef = EntityFile(ent, "Super_Charm")
+    assert len(ef._format_slots(ef.component("Super Effect Descripton Format"))[0]) == 3
+    assert not [i for i in CK.check(ent, None, name="Super_Charm") if i.error]
+
+
+def test_super_effects_replace_the_bases_own():
+    from rsmm.engine import item_modifier as IM
+    from rsmm.engine.entity_check import _corpus_reader
+    raw = _corpus_reader("Objects\\Magical_Objects\\Rare\\Damage_Attack.entity.ot")
+    if raw is None:
+        pytest.skip("shipped items not available (no mirror, no install)")
+    files = C.build_magic_item(new_id="Ace_Two", base_id="Damage_Attack", base_cooked=raw,
+                               corpus=[], super_effects=[{"stat": "Crit chance", "amount": 0.05}])
+    ent = next(b for p, b in files.items() if p.endswith(".EntitySettingsResource.gen"))
+    assert _super_state_refs(ent, "Ace_Two") == ["Crit Chance Modifier Super Effect"]
+    assert {m.name for m in IM.list_modifiers(ent) if m.super_effect} >= {
+        "Crit Chance Modifier Super Effect"}

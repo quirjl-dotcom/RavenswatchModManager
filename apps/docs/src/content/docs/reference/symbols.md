@@ -25,7 +25,7 @@ corpus (survives game updates); **va** = base-relative absolute (data globals);
 Functions tagged `callable` have a typed C++ accessor in `engine::` and a Lua
 resolver entry. See [CLAUDE.md] for the workflow.
 
-Total: **331** symbols across 27 categories.
+Total: **347** symbols across 27 categories.
 
 ## analytics
 
@@ -460,13 +460,29 @@ Total: **331** symbols across 27 categories.
 |------|---------|--------|----------|------------------|
 | `BookController_ResolveSettings` | `0x1403024f0` | ✅ ok | ✔ | void(oCDtEntityCpnt3DBookController* self) |
 | `BookController_ResolveTabs` | `0x140303790` | ✅ ok | ✔ | void(oCDtEntityCpnt3DBookController* self) |
+| `BookMenuUiController_OnHide` | `0x1403da3d0` | ✅ ok | ✔ | void(void* uiController) |
+| `BookMenuUiController_OnShow` | `0x1403d9da0` | ✅ ok | ✔ | void(void* uiController) |
 | `HeroSelect_ConfirmBlockReason` | `0x140268570` | ✅ ok | ✔ | int(void* screen) |
 | `HeroSelect_ConfirmPressed` | `0x1403e17f0` | ✅ ok | ✔ | void(void* screen) |
 | `HeroSelect_PortraitPicked` | `0x1403e61d0` | ✅ ok | ✔ | THE 'hero already selected' lock (Ghidra, b9c3642884a8, 2026-10-15). Called when a hero… |
 | `HeroSelect_SetConfirmEnabled` | `0x1403e19f0` | ✅ ok | ✔ | void(void* screen, bool enabled) |
 | `HeroSelect_ValidateBlockedPtr` | `0x141436a18` | 📍 va |  | Pointer to the object whose byte at +0x11a8 blocks the Select_Hero_Book_Page 'Validate … |
+| `InGameMenuGs_OnEnter` | `0x140292740` | ✅ ok | ✔ | void(oe::dt::InGameMenuGs* self, void* ctx) |
+| `InGameMenuGs_OnLeave` | `0x1402929e0` | ✅ ok | ✔ | void(oe::dt::InGameMenuGs* self, void* ctx) |
+| `LoadingScreenUiController_OnHide` | `0x140348a20` | ✅ ok | ✔ | void(void* uiController) |
+| `LoadingScreenUiController_OnShow` | `0x1403480e0` | ✅ ok | ✔ | void(void* uiController) |
+| `ModalUiController_OnHide` | `0x1407e1ab0` | ✅ ok | ✔ | void(void* uiController) |
+| `ModalUiController_OnShow` | `0x1407e1750` | ✅ ok | ✔ | void(void* uiController) |
+| `OptionsMenuElement_SetTitle` | `0x14044ddf0` | ✅ ok | ✔ | void(void* element, const oCString* text) |
+| `OptionsMenu_AddCategory` | `0x1403f2060` | ✅ ok | ✔ | void*(void* optionsCtrl, void* page, void* parent, const oCString* title, u8 type) |
+| `OptionsMenu_AppendRow` | `0x1403f4d00` | ✅ ok | ✔ | void(void** ctx, void* category, void* row) |
+| `OptionsMenu_BuildLastCategory` | `0x1403f4e30` | ✅ ok | ✔ | void(void* optionsCtrl, void* page, void* parent) |
+| `OptionsMenu_SelectCategory` | `0x1403f6010` | ✅ ok | ✔ | void(void* optionsCtrl, void* tabButtonGameUi) |
+| `OptionsMenu_SpawnMultiChoice` | `0x1403fc7e0` | ✅ ok | ✔ | void*(void* elementFactory, void* templateRef, void* rowParent) |
+| `PauseMenu_GetActionCallback` | `0x14034d380` | ✅ ok | ✔ | void*(void* pauseMenuCtrl, void* outCallback, uint32_t actionKey, void* unused) |
 | `StringFormat_ArgPointer` | `0x1402c44f0` | ❓ unverified |  | void(void** arg, oCString* out, FormatSpec* spec) |
 | `StringFormat_ArgString` | `0x14052c7d0` | ❓ unverified |  | void(oCString* arg, oCString* out, FormatSpec* spec) |
+| `StringVector_AssignFromArray` | `0x1401ba310` | ✅ ok | ✔ | void(void* vec, const oCString* items, u32 count) |
 | `UiButton_InputPoll` | `0x1407d4ec0` | ✅ ok | ✔ | void(ButtonUiCpntArray* cpnts) |
 | `UiButton_PressCommit` | `0x14069f030` | ✅ ok | ✔ | void(oCUINavigableZoneDesc* widget) |
 | `UiButton_PressReturnSite` | `0x1407d4fa2` | ✅ ok |  | (code location, not callable) |

@@ -407,10 +407,10 @@ def _coerce_add_stats(raw) -> list[dict]:
         on = e.get("on")
         if on is not None and not isinstance(on, str):
             raise ContentError(f"add_stats: on must be a game event name, got {on!r}")
-        # A charge is a count: "+1 charge", never "+100%".
-        from ...engine.talent_add_stat import is_charge
+        # A charge or integer stat is a count: "+1", never "+100%".
+        from ...engine import item_modifier as IM
         out.append({"talent": str(e["talent"]), "stat": e["stat"], "values": e.get("values"),
-                    "percent": bool(e.get("percent", not is_charge(e["stat"]))),
+                    "percent": bool(e.get("percent", not IM.is_integer_stat(e["stat"]))),
                     "during": during,
                     "after": after, "seconds": e.get("seconds"),
                     "cooldown": e.get("cooldown"), "next": nxt, "on": on})
@@ -922,7 +922,16 @@ def emit(mod_id: str, defn: ContentDef, out_dir: Path) -> list[Path]:
                 f"exactly one entity file (matched {len(candidates)}: "
                 f"{[p.name for p in candidates]})")
         p = candidates[0]
-        ed = EntityEdit(edited.get(p) or p.read_bytes())
+        others = [q for q in hero_dir.entity_files() + _inherited_files(hero_dir)
+                  if q != p]
+        readers = []
+        for q in others:
+            if q in edited:
+                readers.append(edited[q])
+                continue
+            earlier = out_dir / Path(*q.rel.split("/"))
+            readers.append(earlier.read_bytes() if earlier.is_file() else q.read_bytes())
+        ed = EntityEdit(edited.get(p) or p.read_bytes(), readers=readers)
         try:
             for frm, to, opts in rewires:
                 ed.rewire_ref(frm, to, **opts)
