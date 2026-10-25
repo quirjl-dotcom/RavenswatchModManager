@@ -1,6 +1,27 @@
 {
-  "generated": "2026-10-24",
+  "generated": "2026-10-25",
   "entries": [
+    {
+      "version": "",
+      "date": "2026-10-25",
+      "summary": "Item effect fixes: Vitality and Attack power entered in displayed points, correct card units for flat stats, per-level shield scaling",
+      "highlights": [
+        "Vitality and Attack power effects are entered as the number shown in game (10 = +10%), no more x100 bonuses",
+        "Armour, Shield and other flat stats show their real number on item cards instead of x100",
+        "New per_level = true: item effects can grow with hero level, like Fairy Dust's shield",
+        "Fractional Free Reroll amounts are rejected instead of silently rounding to 0"
+      ],
+      "cli_version": 16
+    },
+    {
+      "version": "",
+      "date": "2026-10-25",
+      "summary": "Pams fixes",
+      "highlights": [
+        "Pams fixes"
+      ],
+      "cli_version": 15
+    },
     {
       "version": "",
       "date": "2026-10-24",
@@ -504,30 +525,6 @@
       "summary": "Mods can set each chapter's day/night timer",
       "highlights": [
         "New: mods can change day/night length and boss timing per chapter (Chapter Timer)"
-      ]
-    },
-    {
-      "version": "",
-      "loader_version": 28,
-      "date": "2026-10-08",
-      "summary": "Damage meter keeps each player's damage on their own row across chapters, plus stability fixes for mods",
-      "highlights": [
-        "Damage meter: after a chapter change, a player's damage stays on their own row instead of moving to a new one",
-        "Damage meter: players who left the lobby no longer appear on the board",
-        "Damage meter: much less log spam during co-op runs",
-        "Mod settings: a mod that adjusts its own setting no longer freezes the game",
-        "Mods that read the camera, hero stats or XP no longer error between chapters",
-        "Fixed negative stat values showing as huge numbers"
-      ]
-    },
-    {
-      "version": "5.9.9",
-      "date": "2026-10-06",
-      "summary": "Mods that need your hero (like the camera mod) now work for everyone, and the Log starts empty until a game runs.",
-      "highlights": [
-        "Fixed: the camera mod and other mods that read or change your hero did nothing unless a hidden loader setting had been switched on by hand. Settings > Loader features now has a Hero capture switch, and a mod that needs it switches it on for you when you apply.",
-        "Log: opens empty until a game is running, then shows that game live. Pick Last run or any earlier run in the list to read an old log.",
-        "For mod makers: `loader_flags = [\"RSMM_ENABLE_HERO_CAPTURE\"]` in [mod] asks for hero capture while your mod is enabled."
       ]
     }
   ]

@@ -209,12 +209,13 @@ def test_copies_get_their_own_type_id_too(tmp_path):
 
 
 @pytest.mark.parametrize("base_rel, base_id", [
-    ("Rare/Increase_Shield", "Increase_Shield"),      # had a countdown: re-pointed
-    ("Common/Dash_Crit_Chance", "Dash_Crit_Chance"),  # had none: made to read the timer
+    ("Rare/Increase_Shield", "Increase_Shield"),      # had a countdown: disarmed
+    ("Common/Dash_Crit_Chance", "Dash_Crit_Chance"),  # had none: left disarmed
 ])
-def test_the_item_icon_counts_down_the_effect(base_rel, base_id):
-    """The icon showed no countdown: the shield's link reads its timer with a key no
-    Timer answers. value_4 = full time, value_5 = the timer's elapsed time."""
+def test_the_item_icon_does_not_count_down_the_effect(base_rel, base_id):
+    """A timed buff duration must not bind to Dt Magical Object Data: value_4 > 0
+    puts the item into an in-cooldown state (value_5 / value_4 < 1.0) which shows a
+    radial cooldown on the item icon and suppresses triggers."""
     raw = corpus.read(f"EntitySettings/Objects/Magical_Objects/{base_rel}"
                       ".entity.ot.EntitySettingsResource.gen")
     if raw is None:
@@ -224,14 +225,8 @@ def test_the_item_icon_counts_down_the_effect(base_rel, base_id):
     ent = next(b for p, b in files.items() if p.endswith(".gen"))
     data = EntityFile(ent, "x").component("Dt Magical Object Data")
     d = {f.name: f.text for f in EF.fields(data)}
-    assert d["value_4"].startswith("f32 7")
-    assert d["value_5"].endswith("\\Crit Chance Modifier Timer Effect")
-    # Read as ELAPSED time (0x1683197e), as the one working shipped countdown
-    # does; the shield's 0x0fd2c964 is a key no Timer answers.
-    lab = b"[Timer] " + base_id[:-2].encode() + b"_M\\Crit Chance Modifier Timer Effect"
-    i = ent.find(lab, ent.find(b"Dt Magical Object Data"))
-    j = ent.find(b'""\xbb\xaa', i)
-    assert ent[j + 4:j + 8] == (0x1683197E).to_bytes(4, "little")
+    assert d["value_4"].startswith("f32 0")
+    assert d["value_5"].startswith("f32 0")
 
 
 _BALOR = ("EntitySettings/Objects/Magical_Objects/Cursed/"
@@ -273,12 +268,66 @@ def test_an_effect_without_seconds_is_always_on_and_one_with_needs_both():
         IE.Effect.parse({"stat": "Crit chance", "amount": 0.1, "on": "dash"})
 
 
+def test_effect_amounts_are_finite_and_integer_stats_whole():
+    """0.5 free rerolls used to round to 0 silently; nan reached the cooker."""
+    from rsmm.engine import item_effect as IE
+    assert IE.Effect.parse({"stat": "Free Reroll", "amount": 2.0}).amount == 2
+    with pytest.raises(IE.ItemEffectError, match="whole units"):
+        IE.Effect.parse({"stat": "Free Reroll", "amount": 0.5})
+    with pytest.raises(IE.ItemEffectError, match="finite"):
+        IE.Effect.parse({"stat": "Crit chance", "amount": float("nan")})
+
+
+def test_per_level_shield_is_written_as_fairy_dusts():
+    """per_level multiplies the amount by the holder's Level Healing through a
+    selector shaped like Fairy Dust's (10 with no holder), and the card reads
+    the level-1 number."""
+    from rsmm.cli.editor.content import _built_slots
+    from rsmm.engine import entity_check as CK
+    from rsmm.engine import entity_graph as EG
+    from rsmm.engine import entity_parts as P
+    from rsmm.engine import item_effect as IE
+    files = C.build_magic_item(
+        new_id="Level_Shield", base_id="Increase_Shield", base_cooked=_shield(),
+        corpus=[], rarity="Rare", effect=[{"stat": "Shield", "amount": 10, "per_level": True}])
+    ent = next(b for p, b in files.items() if p.endswith(".gen"))
+    ours = {c.name: c for c in EG.parse(ent).components}
+    fd = {c.name: c for c in EG.parse(_shield()).components}
+    get, sel = ours["Owner Level Healing Get Value Effect"], ours["Level Healing Selector Effect"]
+    shipped = P.decode(fd["Owner Level Healing Get Value"])
+    assert P.decode(get)["value"] == shipped["value"]
+    assert P.decode(get)["template"] == shipped["template"]
+    # Same layout; only the two links to the Get Value carry a longer name.
+    grow = len("Level_Shield\\Owner Level Healing Get Value Effect") - len(
+        "Increase_Shield\\Owner Level Healing Get Value")
+    assert len(sel.body) == len(fd["Level Healing Selector"].body) + 2 * grow
+    op = ours["Crit Chance Value Operation Effect"]
+    assert [r.path.rsplit("\\", 1)[-1] for r in op.refs] == [
+        "Level Healing Selector Effect", "Crit Chance Value Effect", "Amount Selector"]
+    assert _built_slots(ent, "Descripton Format")[0]["value"] == 10.0
+    assert CK.check(ent, _shield(), name="Level_Shield") == []
+    assert item_warnings(ent, _shield(), set()) == []
+    with pytest.raises(IE.ItemEffectError, match="per_level"):
+        IE.Effect.parse({"stat": "Vitality", "amount": 10, "per_level": True})
+
+
+def test_card_units_follow_shipped_cards():
+    """Shipped cards print armour plain (mode 0/2), so +5 armour is not "+500";
+    a negative amount carries its own sign instead of "+-"."""
+    from rsmm.engine import item_effect as IE
+    assert IE.Effect.parse({"stat": "Armour", "amount": 5}).percent is False
+    assert IE.Effect.parse({"stat": "Shield", "amount": 10}).percent is False
+    assert IE.Effect.parse({"stat": "Crit chance", "amount": 0.1}).percent is True
+    neg = IE.Effect.parse({"stat": "Crit chance", "amount": -0.1})
+    assert IE.describe([neg]) == "• #{0}%@ #Crit chance@"
+
+
 def test_the_card_text_numbers_every_effect_in_order():
     from rsmm.engine import item_effect as IE
     text = IE.describe(IE.parse_effects([
         {"stat": "Crit chance", "amount": 0.1},
         {"stat": "Armour", "amount": 5, "percent": False},
-        {"stat": "Attack power", "amount": 0.2, "seconds": 4, "on": "dash"}]))
+        {"stat": "Attack power", "amount": 20, "seconds": 4, "on": "dash"}]))
     assert text.splitlines() == [
         "• #+{0}%@ #Crit chance@", "• #+{1}@ #Armour@",
         "• After dashing, gain #+{2}%@ #Attack power@ for #{3}@ seconds"]
@@ -289,7 +338,7 @@ def test_several_effects_build_on_one_item_with_no_issues():
     from rsmm.engine import item_modifier as IM
     eff = [{"stat": "Crit chance", "amount": 0.1},
            {"stat": "Armour", "amount": 5, "percent": False},
-           {"stat": "Attack power", "amount": 0.2, "seconds": 4, "on": "dash"},
+           {"stat": "Attack power", "amount": 20, "seconds": 4, "on": "dash"},
            {"stat": "Crit chance", "amount": 0.15, "seconds": 3, "on": "damage_taken"}]
     files = C.build_magic_item(new_id="Wanderers_Charm", base_id="Increase_Shield",
                                base_cooked=_shield(), corpus=[], rarity="Rare",
@@ -354,7 +403,7 @@ def test_item_effects_scale_with_duplicate_count():
     _shield()
     effs = [
         {"stat": "Crit chance", "amount": 0.1},
-        {"stat": "Attack power", "amount": 0.2, "seconds": 5.0, "on": "dash"},
+        {"stat": "Attack power", "amount": 20, "seconds": 5.0, "on": "dash"},
     ]
     files = C.build_magic_item(new_id="Stacking_Item", base_id="Increase_Shield",
                                base_cooked=_shield(), corpus=[], rarity="Rare",
@@ -384,7 +433,10 @@ def test_item_effects_scale_with_duplicate_count():
     assert r"[Value Selector] Magical_Objects_Model\Amount Selector" in op2_refs
     mod2 = comps["Crit Chance Modifier Effect 2"]
     d2 = P.decode(mod2)
-    op_path2 = "[Multi values operations] Stacking_Item\\Crit Chance Value Operation Effect 2"
+    # Attack power is entered in points (20 = +20%); the modifier reads its own
+    # scaled 0.2 while the card keeps the authored 20.
+    op_path2 = ("[Multi values operations] Stacking_Item\\"
+                "Modifier Crit Chance Value Operation Effect 2")
     assert d2["amount"].source.path == op_path2
     assert d2["amount"].key == 0x17ae7811
     assert struct.unpack("<f", d2["amount"].value)[0] == pytest.approx(0.2)
@@ -392,7 +444,7 @@ def test_item_effects_scale_with_duplicate_count():
     # Description format slots point to the operations
     slots = _slots(ent)
     assert slots[0] == ("Crit Chance Value Operation Effect", 1)
-    assert slots[1] == ("Crit Chance Value Operation Effect 2", 1)
+    assert slots[1] == ("Crit Chance Value Operation Effect 2", 0)
     assert slots[2] == ("Crit Chance Duration Value Effect 2", 0)
 
     assert item_warnings(ent, _shield(), set()) == []
@@ -409,7 +461,7 @@ def test_super_effects_do_not_scale_with_duplicate_count():
     _shield()
     supers = [
         {"stat": "Crit chance", "amount": 0.05},
-        {"stat": "Attack power", "amount": 0.1, "seconds": 3.0, "on": "dash"},
+        {"stat": "Attack power", "amount": 10, "seconds": 3.0, "on": "dash"},
     ]
     files = C.build_magic_item(new_id="Super_Item", base_id="Increase_Shield",
                                base_cooked=_shield(), corpus=[], rarity="Rare",
@@ -432,7 +484,7 @@ def test_super_effects_do_not_scale_with_duplicate_count():
     super_slots = [(s["node"], s["mode"])
                    for s in _built_slots(ent, "Super Effect Descripton Format")]
     assert super_slots[0] == ("Crit Chance Value Super Effect", 1)
-    assert super_slots[1] == ("Crit Chance Value Super Effect 2", 1)
+    assert super_slots[1] == ("Crit Chance Value Super Effect 2", 0)
     assert super_slots[2] == ("Crit Chance Duration Value Super Effect 2", 0)
 
     assert item_warnings(ent, _shield(), set()) == []
