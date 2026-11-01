@@ -21,6 +21,17 @@ One step per table::
                                           linked to another part becomes this
                                           literal (the link is dropped)
 
+    override = "Initialize In Default Form Value"   bring a part of an ANCESTOR
+    from = "Heroes/Hero_Common/Hero_Alt_Form_Common"  entity in as a record that
+                                          replaces it in the merged hero, so it
+                                          can be edited (see entity_graph_edit).
+                                          ``from`` is a hero name, or any entity
+                                          by its path under EntitySettings. This
+                                          is the only way to change a part the
+                                          hero does not already override: a
+                                          ``clone`` would add a second part the
+                                          engine also instantiates.
+
     set = "My Spawner.position[8]"        the n-th number inside an object
     value = 1.5708                        field (the spawn's yaw, radians)
 
@@ -35,6 +46,20 @@ One step per table::
     remove_link = "On Damage Received.activates"    the same, by what it points at:
     to = "Modifier"                       steady when other steps change the order
 
+    add_subobject = "Skill Attack Damage.bytes_36"   attach a sub-object a donor
+    donor = "Skill Defense Aoe Bleed Damage.bytes_36[0]"  entity owns in one of
+    from = "Carmilla"                     its id lists (a damage's debuffs, an
+                                          Fx's setups); ``donor_index = n`` picks
+                                          one of THIS entity's instead
+    replace_ref = { "Old Part" = "New Part" }   re-point the copy's references
+
+    replace_subobject = "Fx_Explosion.bytes_1[0]"    the same, but in place of
+    from = "Heroes/Hero_Carmilla/Hero_Carmilla_Power_Orb"  the sub-object the
+    donor = "Explosion Fx Active.bytes_1[0]"      slot already holds: the slot
+                                          keeps its id, so nothing that names it
+                                          changes (an Fx list plays one setup per
+                                          slot; adding would play both)
+
     percent = "Descripton Format.obj_4"   a card slot shown x100 as a percentage
     value = true                          (false: the plain number)
 
@@ -48,12 +73,15 @@ owner, ...) stops the apply rather than install an ability that does nothing.
 
 from __future__ import annotations
 
+import struct
+
 from dataclasses import dataclass, field
 
 from . import entity_check as CK
 from .entity_graph_edit import EntityEditError, EntityFile
 
-_OPS = ("clone", "set", "link", "add_link", "remove_link", "percent")
+_OPS = ("clone", "override", "set", "link", "add_link", "remove_link", "percent",
+        "add_subobject", "replace_subobject")
 
 
 class AbilityEditError(ValueError):
@@ -82,6 +110,46 @@ def hero_entity_ref(name: str) -> str:
     return f"Heroes\\{stem}\\{stem}.entity.ot"
 
 
+def _subobject_source(step: dict, ef: EntityFile, c, f, read):
+    """The donor sub-object an ``add_subobject`` / ``replace_subobject`` step
+    names, and the donor GUIDs it re-points at components of this file."""
+    from . import entity_fields as EF
+    donor_src = ef
+    if step.get("from"):
+        ref = source_entity_ref(str(step["from"]))
+        raw_donor = read(ref)
+        if raw_donor is None:
+            raise AbilityEditError(f"no entity {ref}")
+        donor_src = EntityFile(raw_donor, ref.rsplit("\\", 1)[-1][:-len(".entity.ot")])
+    donor_spec = step.get("donor")
+    if donor_spec:
+        d_part, _, d_fld = donor_spec.rpartition(".")
+        d_base, _, d_idx = d_fld.partition("[")
+        dc = donor_src.component(d_part)
+        df = next((x for x in EF.fields(dc) if x.name == d_base), None)
+        if df is None:
+            raise AbilityEditError(f"{d_part!r} has no field {d_base!r}")
+        dn = struct.unpack_from("<I", dc.body, df.offset)[0]
+        d_i = int(d_idx.rstrip("]")) if d_idx else 0
+        if d_i < 0 or d_i >= dn:
+            raise AbilityEditError(f"donor index {d_i} out of range (have {dn} items)")
+        donor_obj_id = struct.unpack_from(f"<{dn}I", dc.body, df.offset + 4)[d_i]
+    else:
+        n = struct.unpack_from("<I", c.body, f.offset)[0]
+        donor_idx = int(step.get("donor_index", 0))
+        if donor_idx < 0 or donor_idx >= n:
+            raise AbilityEditError(f"donor_index {donor_idx} out of range (have {n} items)")
+        donor_obj_id = struct.unpack_from(f"<{n}I", c.body, f.offset + 4)[donor_idx]
+    refs_map = {}
+    if "replace_ref" in step:
+        rep = step["replace_ref"]
+        if not isinstance(rep, dict):
+            raise AbilityEditError("replace_ref must be a mapping of old_component -> new_component")
+        for old_name, new_name in rep.items():
+            refs_map[donor_src.component(old_name).guid] = str(new_name)
+    return donor_src, donor_obj_id, refs_map
+
+
 def apply(files: dict[str, bytes], steps: list[dict], *, main: str, seed: str,
           read=None) -> Result:
     """Apply ``steps`` to ``files`` (entity stem -> bytes, the base family)."""
@@ -108,6 +176,8 @@ def apply(files: dict[str, bytes], steps: list[dict], *, main: str, seed: str,
             ef = member(step)
             if op == "clone":
                 _clone(ef, step, f"{seed}:{n}", read)
+            elif op == "override":
+                _override(ef, step, f"{seed}:{n}", read)
             else:
                 part, _, fld = str(step[op]).rpartition(".")
                 if not part:
@@ -124,7 +194,30 @@ def apply(files: dict[str, bytes], steps: list[dict], *, main: str, seed: str,
                     if not isinstance(step.get("value", True), bool):
                         raise AbilityEditError("percent takes value = true or false")
                     ef.set_format_mode(part, fld, step.get("value", True))
-                else:
+                elif op in ("add_subobject", "replace_subobject"):
+                    from . import entity_fields as EF
+                    base, slot = fld, None
+                    if op == "replace_subobject":
+                        base, _, idx = fld.partition("[")
+                        if not (idx.endswith("]") and idx[:-1].isdigit()):
+                            raise AbilityEditError(
+                                f"replace_subobject = {step[op]!r}: name the slot, "
+                                f"'Part.list[n]'")
+                        slot = int(idx[:-1])
+                    c = ef.component(part)
+                    f = next((x for x in EF.fields(c) if x.name == base), None)
+                    if f is None:
+                        raise AbilityEditError(f"{part!r} has no field {base!r}")
+                    donor_src, donor_obj_id, refs_map = _subobject_source(step, ef, c, f, read)
+                    if op == "replace_subobject":
+                        ef.replace_subobject(part, base, donor_src, donor_obj_id,
+                                             index=slot, refs=refs_map)
+                    else:
+                        switch = step.get("switch")
+                        ef.add_subobject(part, base, donor_src, donor_obj_id,
+                                         refs=refs_map,
+                                         switch=str(switch) if switch else None)
+                elif op == "remove_link":
                     base, _, idx = fld.partition("[")
                     if idx:
                         ef.remove_ref(part, base, int(idx.rstrip("]")))
@@ -167,6 +260,20 @@ def _link_index(ef: EntityFile, part: str, field: str, to: str) -> int:
     return hits[0]
 
 
+def _override(ef: EntityFile, step: dict, seed: str, read) -> None:
+    """``override = "Part"``: bring the ancestor entity's part in as the record
+    that replaces it, so the steps after it edit the real thing."""
+    what = str(step["override"])
+    if "." in what:
+        raise AbilityEditError(f"override = {what!r}: name a whole part, not a field")
+    ref = source_entity_ref(str(step.get("from") or ""))
+    raw = read(ref)
+    if raw is None:
+        raise AbilityEditError(f"no entity {ref}")
+    src = EntityFile(raw, ref.rsplit("\\", 1)[-1][:-len(".entity.ot")])
+    ef.override(what, src, seed=seed)
+
+
 def _clone(ef: EntityFile, step: dict, seed: str, read) -> None:
     src = ef
     if step.get("from"):
@@ -186,6 +293,11 @@ def _clone(ef: EntityFile, step: dict, seed: str, read) -> None:
     else:
         names = [what] if isinstance(what, str) else [str(x) for x in what]
         regroup = {}
-    suffix = str(step.get("suffix", f" {new_group}" if new_group else " Copy"))
-    ef.clone(names, rename={x: x + suffix for x in names}, group=regroup, seed=seed,
+    rename = step.get("rename")
+    if isinstance(rename, dict):
+        rename_map = {str(k): str(v) for k, v in rename.items()}
+    else:
+        suffix = str(step.get("suffix", f" {new_group}" if new_group else " Copy"))
+        rename_map = {x: x + suffix for x in names}
+    ef.clone(names, rename=rename_map, group=regroup, seed=seed,
              source=None if src is ef else src)

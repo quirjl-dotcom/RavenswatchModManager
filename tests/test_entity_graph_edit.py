@@ -168,6 +168,99 @@ ICE_CLONE = ("EntitySettings/Heroes/Hero_Snow_Queen/"
              "Hero_Snow_Queen_Ice_Clone.entity.ot.EntitySettingsResource.gen")
 
 
+RED = "EntitySettings/Heroes/Hero_Red/Hero_Red.entity.ot.EntitySettingsResource.gen"
+ALT_FORM = ("EntitySettings/Heroes/Hero_Common/"
+            "Hero_Alt_Form_Common.entity.ot.EntitySettingsResource.gen")
+
+
+@pytest.mark.skipif(corpus.read(RED) is None or corpus.read(ALT_FORM) is None,
+                    reason="no Red")
+def test_a_part_of_an_ancestor_is_brought_in_as_a_replacement_record():
+    """A hero does not carry its ancestors' parts, so a clone of one would be a
+    SECOND part the engine also instantiates. ``override`` copies it as the
+    record that replaces the ancestor's -- its header names the ancestor and
+    keeps that part's GUID, while the record itself gets a fresh one (the shape
+    172 of Red's 178 overrides have)."""
+    raw = corpus.read(RED)
+    ef = EE.EntityFile(raw, "Hero_Red")
+    ambiguous_before = ef.pointers()[1]
+    src = EE.EntityFile(corpus.read(ALT_FORM), "Hero_Alt_Form_Common")
+    part = src.component("Initialize In Default Form Value")
+    assert not [c for c in ef.graph().components
+                if c.name == "Initialize In Default Form Value"]
+
+    ef.override("Initialize In Default Form Value", src, seed="t")
+    c = ef.component("Initialize In Default Form Value")
+    assert c.group == part.group and c.name == part.name
+    assert c.override.kind == "Value"
+    assert c.override.path == (f"[Value] Hero_Alt_Form_Common\\{part.group}\\{part.name}")
+    assert c.override.guid == part.guid            # the ancestor part it replaces
+    assert c.guid != part.guid                     # its own identity
+    ef.set_value("Initialize In Default Form Value", "value", False)
+    assert _field(ef, "Initialize In Default Form Value", "value").text == "bool False"
+
+    out = ef.to_bytes()
+    again = EE.EntityFile(out, "Hero_Red")
+    c = again.component("Initialize In Default Form Value")
+    assert c.override.path.endswith("\\Base\\Initialize In Default Form Value")
+    assert _field(again, "Initialize In Default Form Value", "value").text == "bool False"
+    # One part under that name, and the copy's own sub-objects stay owned.
+    assert [x.path for x in again.graph().components
+            if x.name == "Initialize In Default Form Value"] == ["Base\\Initialize In Default Form Value"]
+    assert again.pointers()[1] == ambiguous_before      # nothing new is ambiguous
+
+
+RED_BOMB = ("EntitySettings/Heroes/Hero_Red/"
+            "Hero_Red_Bomb.entity.ot.EntitySettingsResource.gen")
+CARM_ORB = ("EntitySettings/Heroes/Hero_Carmilla/"
+            "Hero_Carmilla_Power_Orb.entity.ot.EntitySettingsResource.gen")
+
+
+@pytest.mark.skipif(corpus.read(RED_BOMB) is None or corpus.read(CARM_ORB) is None,
+                    reason="no Red bomb")
+def test_a_sub_object_list_slot_is_replaced_in_place():
+    """Swapping one of an Fx's setups: a component plays EVERY sub-object in its
+    id list, so adding a second setup would play the old one too. Replacing the
+    slot keeps its id (what activates it is unchanged) and re-points the copy's
+    parameter references at this entity's parts, not the donor's."""
+    import struct
+
+    from rsmm.engine import cooked
+    from rsmm.engine import entity_strings as ES
+
+    host = EE.EntityFile(corpus.read(RED_BOMB), "Hero_Red_Bomb")
+    donor = EE.EntityFile(corpus.read(CARM_ORB), "Hero_Carmilla_Power_Orb")
+
+    def ids(ef, comp, field):
+        c = ef.component(comp)
+        f = next(x for x in EF.fields(c) if x.name == field)
+        n = struct.unpack_from("<I", c.body, f.offset)[0]
+        return [struct.unpack_from("<I", c.body, f.offset + 4 + 4 * i)[0]
+                for i in range(n)]
+
+    before = ids(host, "Fx_Explosion", "bytes_1")
+    donor_ids = ids(donor, "Explosion Fx Active", "bytes_1")
+    got = host.replace_subobject(
+        "Fx_Explosion", "bytes_1", donor, donor_ids[0], index=0,
+        refs={donor.component("Mesh").guid: "Mesh",
+              donor.component("Owner Explosion Radius Get Value").guid: "Explosion Radius",
+              donor.component("Owner Current Radius Get Value").guid: "Explosion Radius"})
+    assert got == before[0]
+
+    out = host.to_bytes()
+    payload = cooked.parse(out).sections[got + 1].payload
+    strings = [s for _o, s in ES._scan_payload(payload)]
+    assert "Settings\\Heroes\\Hero_Carmilla_FX\\Carmilla_Power_Orb_Explosion_01.vfx.ot" in strings
+    assert not any("RED_Bomb_Explosion" in s for s in strings)
+    assert "[3d graphic object] Hero_Red_Bomb\\Mesh" in strings
+    assert strings.count("[Value] Hero_Red_Bomb\\Explosion Radius") == 2
+
+    again = EE.EntityFile(out, "Hero_Red_Bomb")         # the re-framed file parses
+    assert ids(again, "Fx_Explosion", "bytes_1") == before
+    with pytest.raises(EE.EntityEditError, match="no index 9"):
+        again.replace_subobject("Fx_Explosion", "bytes_1", donor, donor_ids[0], index=9)
+
+
 @pytest.mark.skipif(corpus.read(ICE_CLONE) is None, reason="no Snow Queen")
 def test_setting_a_linked_number_replaces_the_link():
     """A linked value picker never reads its inline number, so writing only

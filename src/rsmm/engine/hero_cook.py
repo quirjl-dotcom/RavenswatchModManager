@@ -179,10 +179,19 @@ def resolve_base(herodef: str, app_text: str) -> HeroBase:
     folder, stem = parts[1], parts[2][:-len(".entity.ot")]
     fam = [r.rsplit("/", 1)[-1][:-len(ENTITY_SUFFIX)]
            for r in corpus.rels(f"EntitySettings/Heroes/{folder}/", ENTITY_SUFFIX)]
-    base = HeroBase(herodef, folder, stem, alias, default, bank,
-                    family=sorted(f"Heroes\\{folder}\\{s}.entity.ot" for s in fam
-                                  if s == stem or s.startswith(stem + "_")))
+    family = [f"Heroes\\{folder}\\{s}.entity.ot" for s in fam]
     main = corpus.read(entity_rel(alias.stream))
+    if main:
+        for t in _strings(main):
+            if (t.startswith("GameUis\\Common_Ui\\Life_Bar_Hero_")
+                    and t.endswith(".entity.ot")
+                    and t not in ("GameUis\\Common_Ui\\Life_Bar_Hero_Common.entity.ot",
+                                  "GameUis\\Common_Ui\\Life_Bar_Hero_Peer.entity.ot")
+                    and corpus.read(entity_rel(t)) is not None
+                    and t not in family):
+                family.append(t)
+    base = HeroBase(herodef, folder, stem, alias, default, bank,
+                    family=sorted(family))
     base.body_fbx = _graphic_mesh(main, "Character Mesh") if main else None
     dts = _strings(sraw)
     def mat_after(key) -> str | None:
@@ -234,21 +243,45 @@ class Renamer:
     extra: dict[str, str] = field(default_factory=dict)   # whole-string swaps
 
     def __post_init__(self) -> None:
+        short_base = self.base.stem[5:] if self.base.stem.startswith("Hero_") else self.base.stem
+        short_new = self.new_stem[5:] if self.new_stem.startswith("Hero_") else self.new_stem
+
+        def stem_rename(s: str) -> str:
+            if s.startswith(self.base.stem):
+                return self.new_stem + s[len(self.base.stem):]
+            if s.startswith(f"Life_Bar_{self.base.stem}"):
+                return f"Life_Bar_{self.new_stem}{s[len(f'Life_Bar_{self.base.stem}'):]}"
+            if s.startswith(f"Ghost_{self.base.stem}"):
+                return f"Ghost_{self.new_stem}{s[len(f'Ghost_{self.base.stem}'):]}"
+            if s.startswith(f"{short_base}_"):
+                return f"{short_new}_{s[len(short_base) + 1:]}"
+            return f"{short_new}_{s}"
+
         stems = sorted((r.rsplit("\\", 1)[-1][:-len(".entity.ot")] for r in self.base.family),
                        key=len, reverse=True)
-        self._stems = {s: self.new_stem + s[len(self.base.stem):] for s in stems}
-        alt = "|".join(map(re.escape, stems))
-        self._scope = re.compile(r"(\] )(" + alt + r")(?=\\)")
-        self._path = re.compile(re.escape(f"Heroes\\{self.base.folder}\\")
-                                + "(" + alt + r")(?=\.entity\.ot)")
+        self._stems = {s: stem_rename(s) for s in stems}
+        self._ref_map: dict[str, str] = {}
+        for r in self.base.family:
+            d, _, f = r.rpartition("\\")
+            s = f[:-len(".entity.ot")]
+            self._ref_map[r] = f"{d}\\{self._stems[s]}.entity.ot"
+
+        alt_stems = "|".join(map(re.escape, stems))
+        self._scope = re.compile(r"(\] )(" + alt_stems + r")(?=\\)")
+        alt_refs = "|".join(map(re.escape, sorted(self._ref_map.keys(), key=len, reverse=True)))
+        self._path = re.compile(f"({alt_refs})") if alt_refs else None
 
     def entity_ref(self, old_ref: str) -> str:
-        return self.string(old_ref)
+        return self._ref_map.get(old_ref, self.string(old_ref))
 
     def string(self, s: str) -> str:
         if s in self.extra:
             return self.extra[s]
-        out = self._path.sub(lambda m: f"Heroes\\{self.base.folder}\\{self._stems[m[1]]}", s)
+        if s in self._ref_map:
+            return self._ref_map[s]
+        out = s
+        if self._path is not None:
+            out = self._path.sub(lambda m: self._ref_map[m.group(1)], out)
         out = self._scope.sub(lambda m: m[1] + self._stems[m[2]], out)
         return self._stems.get(out, out)
 

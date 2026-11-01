@@ -392,6 +392,46 @@ components are overrides addressed into the base entity's namespace, e.g.
 for the `.mat`. The smallest body-swap skins (`Hero_Juliet_Bride`,
 `Hero_Romeo_Groom`: 6 sections) are the template for a custom look.
 
+**The starting form is decided at Initialize, before spawner values land.**
+`Hero_Alt_Form_Common`'s `Initialize Set Starting Form Tester` is activated by
+`Event Initialize` and switches `State Default Form` (the human) on when its
+inline test of `Initialize In Default Form Value` is true, `State Alt Form`
+(the wolf) on when false. That value defaults to `true`, and a `Spawner Value`
+(such as Red's `Wolf Initialize Default Form Spawner Value`) is written onto a
+spawned copy *after* the copy's own Initialize, so it never decides the
+starting form -- setting it either way still previews the human. A hero that
+must start in another form has to override the value itself: an override
+record (`[Value] Hero_Alt_Form_Common\Base\Initialize In Default Form Value`,
+fresh GUID in the record, the ancestor part's GUID in its header picker), never
+a `clone`, which would add a second value the engine also instantiates next to
+the ancestor's. `rsmm`'s manifest `override` step does exactly this.
+
+**Two book guards despawn a hero that is already in the alt form.** The select
+screen is built for the opposite case: the hero entity stays in `State Default
+Form` and the wolf is a *separate copy*, spawned by `Preview Wolf Spawner` on
+the first page (`Preview Spawn Wolf Tester` is AND(`State Default Form`,
+`Current Page Index Getter` = 0)) with the spawner values `Is In Preview Scene`
+= true and `Initialize In Default Form` = false. That copy is where the alt-form
+mesh and the wolf's book loop come from. Both guards run from
+`Child Behaviour Preview`, a state of Character_Common's `Behaviour Preview`
+(the state machine's preview slot, never entered in a run):
+
+* `Preview Spawn Wolf Tester.on_false` -> `Preview Wolf Despawn Sender` ->
+  `Preview Wolf Despawn Listener` -> `[Despawn] Character_Common\Base\Despawn`.
+  In the alt form the tester is false, so the hero despawns itself.
+* `Preview Is Owner Alive Value Tester` is AND(not `Is In Preview Scene`,
+  `State Alt Form`) -- exactly a real hero in the alt form, not a spawned copy
+  -- and despawns it through the same part.
+
+A hero forced into the alt form at Initialize (above) therefore previews as an
+empty slot until both testers are dropped from `Child Behaviour Preview`'s
+`activates` list. Nothing else is needed: `Character Mesh Selector` already
+picks `Character Alt Form Mesh` on `State Alt Form`, `Bhv Preview Default
+Animatic Selector` picks the alt book loop, and the wolf's albedo comes back on
+its own -- `Book Preview Albedo Anim Tester` is AND(main-menu flag, `State
+Default Form`), whose false branch is `Albedo Mix Book Preview Reveal Anim
+Wolf`, sized for exactly this case.
+
 **The alias table is plaintext.** `DarkTalesResources/ApplicationSettings.ot`,
 object `DtAliasAppSettingsSection` (class 43): a `Vector<AliasDesc>` of 14
 entries, each `m_u32Val1..4` (the GUID as four LE u32: `404451935` =

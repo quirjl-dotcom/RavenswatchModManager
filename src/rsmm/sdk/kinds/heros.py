@@ -735,7 +735,7 @@ def _emit_custom(mod_id: str, defn: ContentDef, out_dir: Path, base: str,
                         key = f"Hero_{hid}_Outfit{n}_Title"
                         hswap[ss[bank_i + 1]] = key
                         skins_bank_pairs[key] = oname
-            elif f.get("model"):
+            else:
                 slot_of[path] = default
             if n > len(outfit_refs) and placeholder:
                 # A slot still showing the base's skin: its name and blurb read

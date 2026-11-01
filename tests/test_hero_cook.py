@@ -137,3 +137,24 @@ def test_values_set_by_label_or_by_member_and_refuse_typos():
     assert all(len(out[n]) == len(files[n]) for n in files)                      # in place
     with pytest.raises(H.HeroCookError, match="Ultimate Cooldwn"):
         H.set_values(files, {"Ultimate Cooldwn": 1})
+
+
+@pytest.mark.skipif(corpus.read(H.herodef_rel("Red_Update6")) is None, reason="no hero corpus")
+def test_red_family_includes_and_renames_life_bar_and_combo_point_ui():
+    from rsmm.engine import paths
+    app_text = H.pristine_app_settings(paths.default_game_dir())
+    b = H.resolve_base("Red_Update6", app_text)
+    assert "Heroes\\Hero_Red\\Red_Combo_Point_Ui.entity.ot" in b.family
+    assert "GameUis\\Common_Ui\\Life_Bar_Hero_Red.entity.ot" in b.family
+
+    r = H.Renamer(b, "Hero_BloodWolf")
+    assert r.entity_ref("GameUis\\Common_Ui\\Life_Bar_Hero_Red.entity.ot") == \
+        "GameUis\\Common_Ui\\Life_Bar_Hero_BloodWolf.entity.ot"
+    assert r.entity_ref("Heroes\\Hero_Red\\Red_Combo_Point_Ui.entity.ot") == \
+        "Heroes\\Hero_Red\\BloodWolf_Combo_Point_Ui.entity.ot"
+    assert r.string("[Value] Hero_Red\\Ability Common\\Combo Points Current Value") == \
+        "[Value] Hero_BloodWolf\\Ability Common\\Combo Points Current Value"
+    assert r.string("[Game Ui] Red_Combo_Point_Ui\\Game Ui") == \
+        "[Game Ui] BloodWolf_Combo_Point_Ui\\Game Ui"
+    assert r.string("[Entity Get Value] Life_Bar_Hero_Red\\Getter\\Combo Counter Max Get Value") == \
+        "[Entity Get Value] Life_Bar_Hero_BloodWolf\\Getter\\Combo Counter Max Get Value"

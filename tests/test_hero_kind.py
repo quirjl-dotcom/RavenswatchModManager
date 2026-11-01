@@ -495,3 +495,97 @@ def test_a_hidden_mesh_is_an_invisible_copy_on_the_same_skeleton(tmp_path):
     assert len(bound) == 1
     with pytest.raises(ContentError, match="not a mesh"):
         _emit(tmp_path, id="Nyx", base="Beowulf", hide=["No_Such_GEO"])
+
+
+@needs_corpus
+@needs_install
+def test_ability_edit_add_subobject_and_clone_rename(tmp_path):
+    import struct
+    steps = [
+        {"clone": ["State Wolf Basic Attack Step 2", "Wolf Basic Attack Clip 2"],
+         "rename": {"State Wolf Basic Attack Step 2": "State Wolf Basic Attack Step 3",
+                    "Wolf Basic Attack Clip 2": "Wolf Basic Attack Clip 3"}},
+        {"link": "Wolf Basic Attack Clip 3.ref_3", "to": "Wolf Skill Dash Attack Anim"},
+        {"link": "Wolf Basic Attack Clip 3.ref_11", "to": "State Wolf Basic Attack Step 3"},
+        {"remove_link": "State Wolf Basic Attack Step 3.activates", "to": "Wolf Basic Attack Clip Selector 2"},
+        {"add_link": "State Wolf Basic Attack Step 3.activates", "to": "Wolf Basic Attack Clip 3"},
+        {"remove_link": "State Wolf Basic Attack Step 3.on_enter?", "to": "Wolf Basic Attack Clip Selector 2"},
+        {"add_link": "State Wolf Basic Attack Step 3.on_enter?", "to": "Wolf Basic Attack Clip 3"},
+        {"add_subobject": "Wolf Basic Attack Combo.bytes_4", "donor_index": 1,
+         "replace_ref": {"State Wolf Basic Attack Step 2": "State Wolf Basic Attack Step 3"}},
+        {"clone": ["Wolf Basic Attack", "Wolf Basic Attack Damage"],
+         "rename": {"Wolf Basic Attack": "Wolf Basic Attack Step 3",
+                    "Wolf Basic Attack Damage": "Wolf Basic Attack Step 3 Damage"}},
+        {"set": "Wolf Basic Attack Step 3 Damage.value_28", "value": 1.0},
+        {"set": "Wolf Basic Attack Step 3 Damage.value_31", "value": 12.0},
+        {"clone": ["Wolf Basic Attack Damage Multiplier"],
+         "rename": {"Wolf Basic Attack Damage Multiplier": "Wolf Basic Attack Step 3 Bleed Multiplier"}},
+        {"set": "Wolf Basic Attack Step 3 Bleed Multiplier.value", "value": 5.0},
+        {"clone": ["Wolf Basic Attack Supposed Damage Operation"],
+         "rename": {"Wolf Basic Attack Supposed Damage Operation": "Wolf Basic Attack Step 3 Bleed Value Operation"}},
+        {"link": "Wolf Basic Attack Step 3 Bleed Value Operation.operations[1]", "to": "Wolf Basic Attack Step 3 Bleed Multiplier"},
+        {"clone": ["Skill Primary Bleed Modifier"],
+         "rename": {"Skill Primary Bleed Modifier": "Wolf Basic Attack Step 3 Bleed Modifier"}},
+        {"link": "Wolf Basic Attack Step 3 Bleed Modifier.amount", "to": "Wolf Basic Attack Step 3 Bleed Value Operation"},
+        {"add_subobject": "Wolf Basic Attack Step 3 Damage.bytes_36", "from": "Carmilla",
+         "donor": "Skill Defense Aoe Bleed Damage.bytes_36[0]",
+         "replace_ref": {"Skill Defense Aoe Bleed Modifier": "Wolf Basic Attack Step 3 Bleed Modifier"}},
+        {"remove_link": "Wolf Event Skill Dash Attack Active.activates", "to": "Wolf Basic Attack"},
+        {"add_link": "Wolf Event Skill Dash Attack Active.activates", "to": "Wolf Basic Attack Step 3"},
+    ]
+    files = _emit(tmp_path, id="BloodWolfTest", base="Red", abilities=steps)
+    main = next(p for p in files if p.name == "Hero_BloodWolfTest.entity.ot.EntitySettingsResource.gen")
+    from rsmm.engine import entity_graph_edit as EGE
+    ef = EGE.EntityFile(main.read_bytes(), "Hero_BloodWolfTest")
+    c = ef.component("Wolf Basic Attack Combo")
+    from rsmm.engine import entity_fields as EF
+    f4 = next(x for x in EF.fields(c) if x.name == "bytes_4")
+    count = struct.unpack_from("<I", c.body, f4.offset)[0]
+    assert count == 3
+    dmg = ef.component("Wolf Basic Attack Step 3 Damage")
+    f_deb = next(x for x in EF.fields(dmg) if x.name == "bytes_36")
+    debuff_cnt = struct.unpack_from("<I", dmg.body, f_deb.offset)[0]
+    assert debuff_cnt == 1
+    f_stg = next(x for x in EF.fields(dmg) if x.name == "value_31")
+    assert f_stg.text == "f32 12"
+    # Verify the Bleed modifier's amount slot resolved the live operations accessor (0x17AE7811)
+    mod = ef.component("Wolf Basic Attack Step 3 Bleed Modifier")
+    f_amt = next(x for x in EF.fields(mod) if x.name == "amount")
+    amt_bytes = mod.body[f_amt.offset:f_amt.offset + f_amt.size]
+    assert b"\x11x\xae\x17" in amt_bytes
+
+
+@needs_corpus
+@needs_install
+def test_ability_edit_replaces_an_fx_setup_slot_from_another_entity(tmp_path):
+    """``replace_subobject`` addresses a slot ('Part.list[n]') and swaps the
+    sub-object in it for one of a donor entity's, re-pointing the donor's
+    references at this entity's parts. The list keeps its length and order."""
+    import struct
+
+    from rsmm.engine import entity_graph_edit as EGE
+    from rsmm.engine import entity_fields as EF
+    from rsmm.engine import entity_strings as ES
+
+    steps = [{
+        "entity": "Bomb",
+        "replace_subobject": "Fx_Explosion.bytes_1[0]",
+        "from": "Heroes/Hero_Carmilla/Hero_Carmilla_Power_Orb",
+        "donor": "Explosion Fx Active.bytes_1[0]",
+        "replace_ref": {"Mesh": "Mesh",
+                        "Owner Explosion Radius Get Value": "Explosion Radius",
+                        "Owner Current Radius Get Value": "Explosion Radius"},
+    }]
+    files = _emit(tmp_path, id="WolfVfxTest", base="Red", abilities=steps)
+    bomb = next(p for p in files
+                if p.name == "Hero_WolfVfxTest_Bomb.entity.ot.EntitySettingsResource.gen")
+    ef = EGE.EntityFile(bomb.read_bytes(), "Hero_WolfVfxTest_Bomb")
+    c = ef.component("Fx_Explosion")
+    f = next(x for x in EF.fields(c) if x.name == "bytes_1")
+    n = struct.unpack_from("<I", c.body, f.offset)[0]
+    assert n == 3
+    first = struct.unpack_from("<I", c.body, f.offset + 4)[0]
+    strings = [x for _o, x in ES._scan_payload(ef.objects[first])]
+    assert "Settings\\Heroes\\Hero_Carmilla_FX\\Carmilla_Power_Orb_Explosion_01.vfx.ot" in strings
+    assert "[3d graphic object] Hero_WolfVfxTest_Bomb\\Mesh" in strings
+    assert strings.count("[Value] Hero_WolfVfxTest_Bomb\\Explosion Radius") == 2

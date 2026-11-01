@@ -5,11 +5,17 @@
 * ``clone``     copy components (from this file or another entity) under new
                 names, with their own GUIDs, their links among themselves
                 rewired to the copies, and every sub-object they own copied too;
+* ``override``  copy a part of an ANCESTOR entity in as a record that replaces
+                that ancestor's part in the merged entity (the shape every
+                shipped hero override has), so it can be edited;
 * ``set_value`` change a field's literal (a value picker's union, or a raw
                 bool / u32 / f32);
 * ``set_ref``   point a reference field at another component (or at nothing);
 * ``add_ref`` / ``remove_ref``   grow or shrink a reference list (a State's
-                ``activates`` and friends).
+                ``activates`` and friends);
+* ``add_subobject`` / ``replace_subobject``  copy a sub-object of another entity
+                in, either as a new item of an id list or in place of one the
+                list already holds (an FX list's setups, a damage's debuffs);
 
 Fields are addressed by the names ``entity_fields`` gives them.
 
@@ -282,6 +288,47 @@ class EntityFile:
         self.to_bytes()
         return paths
 
+    def override(self, name: str, source: "EntityFile", *, seed: str = "") -> str:
+        """Copy ``source``'s part ``name`` (with everything it owns) into this
+        file as an OVERRIDE RECORD of that ancestor part, and return its path.
+
+        A hero file does not carry its ancestors' parts; it carries records
+        whose header names the ancestor part -- ``[State] Hero_Alt_Form_Common\\
+        Base\\Child State Alt Form`` -- and which the engine uses in place of
+        it in the merged entity. The record has its OWN GUID, while its header
+        picker keeps the ancestor part's GUID and path; 172 of Red's 178
+        override records are built that way (the six others name a part of an
+        older generation, so they no longer resolve). A plain ``clone`` would
+        instead add a NEW part the engine also instantiates next to the
+        ancestor's, which is why editing an ancestor part needs this and not
+        ``clone``.
+        """
+        src = source.component(name)
+        saved = (list(self.objects), bytearray(self.trailer), self._first_new)
+        before = set(self.component_ids)
+        try:
+            self.clone([name], source=source, seed=seed)
+            added = [i for i in self.component_ids if i not in before]
+            if len(added) != 1:
+                raise EntityEditError(f"the copy of {name!r} did not land as one record")
+            p = self.objects[added[0]]
+            pc = [c.name for c in self.cf.classes].index("oCEntityCpntPicker")
+            head = EG._pickers(bytes(p), pc)
+            if not head or head[0][0] != 4:
+                raise EntityEditError(f"{name!r}: the copy has no record header")
+            scope = source.name
+            if not scope:
+                raise EntityEditError("the source entity has no name; pass name= when reading it")
+            tail = f"{src.group}\\{src.name}" if src.group else src.name
+            size = 8 + 16 + 4 + len(head[0][1].path.encode("latin-1")) + 4
+            p[4:4 + size] = (_B + struct.pack("<I", pc) + src.guid
+                             + _lstr(f"[{self._label(src.cls)}] {scope}\\{tail}") + _E)
+            self.to_bytes()
+        except (EntityEditError, EntityAppendError):
+            self.objects, self.trailer, self._first_new = saved
+            raise
+        return src.path
+
     # ---- fields ------------------------------------------------------------
 
     def _field(self, comp: str, field: str) -> tuple[EG.Component, EF.Field, int]:
@@ -443,15 +490,15 @@ class EntityFile:
         obj = c.index - 1
         old = bytes(self.objects[obj][at + a:at + b])
         new = self._picker(target)
-        self.objects[obj][at + a:at + b] = new
-        # A reference inside a value picker is followed by the ACCESSOR the
-        # target is read with, which depends on the target's class and value
-        # type; a stale one reads the new target with the wrong method and
-        # returns garbage (entity_append.fix_accessor has the RE).
         label_end = at + a + len(new) - 4
-        p = bytes(self.objects[obj])
         try:
             acc = _Accessors(cooked.parse(self.to_bytes()))
+            self.objects[obj][at + a:at + b] = new
+            p = bytes(self.objects[obj])
+            # A reference inside a value picker is followed by the ACCESSOR the
+            # target is read with, which depends on the target's class and value
+            # type; a stale one reads the new target with the wrong method and
+            # returns garbage (entity_append.fix_accessor has the RE).
             p = fix_accessor(p, label_end, old[8:24], new[8:24], acc,
                              _picker_path(old), _picker_path(new))
             p = fix_format_slot(p, at + a, label_end, new[8:24], acc)
@@ -564,6 +611,25 @@ class EntityFile:
         "oCEntityCpntGetValueSettings": 0x16ABF2ED,
     }
 
+    def _subobject_payload(self, donor: EntityFile, obj: int,
+                           refs: dict[bytes, str] | None) -> bytearray:
+        """``donor``'s sub-object ``obj`` as a payload this file can own: its
+        class tags remapped to this file's numbering, and ``refs`` (donor GUID
+        -> a component of this file) re-pointed."""
+        if donor.subtree({obj}):
+            raise EntityEditError(f"sub-object #{obj} owns sub-objects of its own; not copied")
+        payload = bytes(donor.objects[obj])
+        extend_class_table(self.cf, donor.cf, class_closure(payload, donor.cf))
+        payload = bytearray(_remap_class_tags(payload, donor.cf, self.cf))
+        head = _B + struct.pack("<I", self._class_index("oCEntityCpntPicker"))
+        for old, target in (refs or {}).items():
+            i = payload.find(head + old)
+            if i < 0:
+                raise EntityEditError(f"sub-object #{obj} does not reference the node to re-point")
+            end = i + 28 + struct.unpack_from("<I", payload, i + 24)[0] + 4
+            payload[i:end] = self._picker(target)
+        return payload
+
     def add_subobject(self, owner: str, list_field: str, donor: EntityFile, obj: int, *,
                       refs: dict[bytes, str] | None = None, switch: str | None = None) -> int:
         """Copy sub-object ``obj`` of ``donor`` into this file, owned by ``owner``
@@ -579,18 +645,7 @@ class EntityFile:
         n = struct.unpack_from("<I", c.body, f.offset)[0]
         if f.size != 4 + 4 * n:
             raise EntityEditError(f"{owner!r}.{list_field} is not an id list")
-        if donor.subtree({obj}):
-            raise EntityEditError(f"sub-object #{obj} owns sub-objects of its own; not copied")
-        payload = bytes(donor.objects[obj])
-        extend_class_table(self.cf, donor.cf, class_closure(payload, donor.cf))
-        payload = bytearray(_remap_class_tags(payload, donor.cf, self.cf))
-        head = _B + struct.pack("<I", self._class_index("oCEntityCpntPicker"))
-        for old, target in (refs or {}).items():
-            i = payload.find(head + old)
-            if i < 0:
-                raise EntityEditError(f"sub-object #{obj} does not reference the node to re-point")
-            end = i + 28 + struct.unpack_from("<I", payload, i + 24)[0] + 4
-            payload[i:end] = self._picker(target)
+        payload = self._subobject_payload(donor, obj, refs)
         if switch is not None:
             t = self.component(switch)
             acc = self.BOOL_ACCESSOR.get(t.cls)
@@ -611,6 +666,40 @@ class EntityFile:
         struct.pack_into("<I", p, at, n + 1)
         self.to_bytes()
         return new_id
+
+    def replace_subobject(self, owner: str, list_field: str, donor: EntityFile, obj: int, *,
+                          index: int = 0, refs: dict[bytes, str] | None = None) -> int:
+        """Put ``donor``'s sub-object ``obj`` in the ``index``-th slot of
+        ``owner``'s id list ``list_field``, in place of the sub-object there.
+
+        The slot keeps its id, so whatever else names it keeps naming it: an FX
+        list's setups are activated through the component that owns the list, and
+        copying one in with :meth:`add_subobject` would play both. ``refs``
+        re-points the copy's references (donor GUID -> a component of this file),
+        which is how an FX setup's parameter slots are fed from the host entity
+        rather than the donor's. Returns the id of the replaced sub-object."""
+        c = self.component(owner)
+        f = next((x for x in EF.fields(c) if x.name == list_field), None)
+        if f is None:
+            raise EntityEditError(f"{owner!r} has no field {list_field!r}")
+        n = struct.unpack_from("<I", c.body, f.offset)[0]
+        if f.size != 4 + 4 * n:
+            raise EntityEditError(f"{owner!r}.{list_field} is not an id list")
+        if not 0 <= index < n:
+            raise EntityEditError(f"{owner!r}.{list_field} has {n} items, no index {index}")
+        obj_id = struct.unpack_from("<I", c.body, f.offset + 4 + 4 * index)[0]
+        if not 0 <= obj_id < len(self.objects):
+            raise EntityEditError(f"{owner!r}.{list_field}[{index}] holds #{obj_id}, "
+                                  f"not a sub-object")
+        payload = self._subobject_payload(donor, obj, refs)
+        old = self.objects[obj_id]
+        self.objects[obj_id] = payload
+        try:
+            self.to_bytes()
+        except EntityEditError:
+            self.objects[obj_id] = old
+            raise
+        return obj_id
 
     def retarget_external(self, comp: str, old: bytes, guid: bytes, label: str) -> int:
         """Point every reference in ``comp`` to GUID ``old`` at a node of ANOTHER
