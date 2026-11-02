@@ -428,7 +428,8 @@ def _files_named(files: list[corpus.CorpusFile], want: str | None) -> list[corpu
     ``Hero_SunWukong_Beads`` is also part of ``Hero_SunWukong_Beads_Explosion``."""
     if not want:
         return list(files)
-    w = want.replace("\\", "/").split("/")[-1].lower().removesuffix(_GEN_SUFFIX.lower()).removesuffix(".entity")
+    w = (want.replace("\\", "/").split("/")[-1].lower()
+         .removesuffix(_GEN_SUFFIX.lower()).removesuffix(".entity"))
     exact = [q for q in files if _stem(q).lower() == w]
     return exact or [q for q in files if want.lower() in q.name.lower()]
 

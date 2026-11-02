@@ -75,8 +75,9 @@ def test_talent_file_filter_disambiguates_superstring_filenames(tmp_path):
     from rsmm.sdk.content import ContentRegistry
     _aladdin()
     cr = ContentRegistry(mod_id="JulietMod")
+    patch = [{"label": "Skill Defense Reload Value Selector", "index": 7, "old": 3.0, "new": 2.0}]
     cr.register("talent", id="juliet_talents", hero="Juliet", file="Hero_Juliet.entity",
-                union_patches=[{"label": "Skill Defense Reload Value Selector", "index": 7, "old": 3.0, "new": 2.0}])
+                union_patches=patch)
     [out] = cr.emit(tmp_path / "assets")
     assert out.name.startswith("Hero_Juliet.entity")
 
